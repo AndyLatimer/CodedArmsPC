@@ -1,0 +1,53 @@
+CODED ARMS - PORT PARA PC (version de desarrollo)
+=================================================
+
+ESTADO: prueba tecnica (Fase B/C). Todavia NO es el juego completo.
+Lo que hay: la geometria y texturas originales de los escenarios cargadas desde
+TU copia del juego, movimiento en primera persona, controles de PC/mando y
+opciones graficas. Aun no hay enemigos, armas ni montaje real de los niveles.
+
+REQUISITOS
+- Windows 10/11 de 64 bits
+- Tarjeta grafica con OpenGL 3.3
+- Tu propia imagen ISO de Coded Arms (PSP). Probado con la version europea
+  ULES-00124 (Coded Arms (Europe).iso).
+
+INSTALACION
+1. Descomprime la carpeta donde quieras.
+2. Copia tu ISO dentro de la carpeta "game" con el nombre CodedArms.iso
+   (o arranca con:  CodedArms.exe --iso "C:\ruta\a\tu.iso").
+3. Ejecuta CodedArms.exe.
+Sin ISO, el programa arranca con un nivel provisional (cajas) para probar controles.
+
+CONTROLES POR DEFECTO (se cambian en config.ini, seccion [bindings])
+  WASD / flechas ......... moverse
+  Raton .................. mirar / apuntar
+  Clic izquierdo ......... disparar (vibracion de prueba en mando)
+  Clic derecho ........... apuntar (camina mas lento)
+  Espacio ................ saltar
+  R / E / Q / G / Tab .... recargar / interactuar / cambiar arma / granada / mapa
+  Esc .................... menu de pausa (opciones graficas y de control)
+  F2 ..................... camara libre (para explorar las piezas del escenario)
+  F3 ..................... informacion de depuracion
+  F11 .................... pantalla completa
+  F12 .................... captura de pantalla
+Mando (Xbox, PlayStation, XInput): stick izq. mover, stick der. mirar, RT disparar,
+LT apuntar, A saltar, X recargar, B interactuar, Y cambiar arma, Start pausa.
+
+En el menu de pausa, "Stage tile set" cambia entre los kits de escenario originales
+(DG_00 ... DG_08, jefes).
+
+CONFIGURACION
+config.ini se crea junto al .exe. Opciones destacadas:
+  [video] width, height, fullscreen (windowed/borderless/exclusive), vsync, fps_cap,
+          fov (horizontal a 16:9, se amplia solo en ultrapanoramicos),
+          texture_filter (nearest/bilinear/trilinear), anisotropy, msaa, hud_scale
+  [input] mouse_sens_x, mouse_sens_y, mouse_invert_y, pad_sens_x, pad_sens_y,
+          pad_invert_y, deadzone_left, deadzone_right, pad_look_curve, rumble
+  [bindings] move_forward = key:W, key:Up    fire = mouse:left, pad:righttrigger ...
+     Formatos: key:<tecla>, mouse:left|right|middle|x1|x2|wheelup|wheeldown,
+               pad:a|b|x|y|leftshoulder|rightshoulder|lefttrigger|righttrigger|start|back|dpup...
+
+Registro de errores: codedarms.log junto al .exe.
+
+Este programa no contiene ningun recurso del juego original: todo se lee de tu ISO.

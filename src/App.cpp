@@ -148,23 +148,23 @@ bool App::initWindow() {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    if (settings_.msaa > 0) {
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 1);
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, settings_.msaa);
-    }
     Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     int w = settings_.width > 0 ? settings_.width : 1280, h = settings_.height > 0 ? settings_.height : 720;
-    window_ = SDL_CreateWindow("Coded Arms (PC port)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
-    if (!window_ && settings_.msaa > 0) { // MSAA unsupported: retry without it
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, 0);
-        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, 0);
+    // Try with the configured MSAA first; some drivers reject multisampled formats, in
+    // which case we retry without it rather than failing to start.
+    for (int attempt = 0; attempt < 2 && !gl_; ++attempt) {
+        bool msaa = attempt == 0 && settings_.msaa > 0;
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, msaa ? 1 : 0);
+        SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, msaa ? settings_.msaa : 0);
+        if (attempt == 1 && settings_.msaa > 0) log::warn("MSAA x%d unavailable, continuing without it", settings_.msaa);
         window_ = SDL_CreateWindow("Coded Arms (PC port)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, w, h, flags);
+        if (window_) gl_ = SDL_GL_CreateContext(window_);
+        if (!gl_ && window_) { SDL_DestroyWindow(window_); window_ = nullptr; }
+        if (!msaa && settings_.msaa == 0) break;
     }
-    if (!window_) { log::error("SDL_CreateWindow: %s", SDL_GetError()); return false; }
-    gl_ = SDL_GL_CreateContext(window_);
     if (!gl_) {
         log::error("OpenGL 3.3 context: %s", SDL_GetError());
-        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Coded Arms", "OpenGL 3.3 is required.", window_);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Coded Arms", "OpenGL 3.3 is required.", nullptr);
         return false;
     }
     if (!renderer_.init(settings_)) return false;
