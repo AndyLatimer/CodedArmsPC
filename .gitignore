@@ -4,3 +4,5 @@ dist/
 screenshots/
 config.ini
 third_party/SDL2-*/
+game/
+*.iso

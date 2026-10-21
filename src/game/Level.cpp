@@ -82,10 +82,14 @@ void Level::solidsInRegion(const Aabb& region, std::vector<Aabb>& out) const {
 
 void Level::buildCollision(CollisionWorld& world) const {
     world.clear();
-    auto quad = [&](Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
+    forEachQuad([&](Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
         world.addTriangle(a, b, c);
         world.addTriangle(a, c, d);
-    };
+    });
+    world.build();
+}
+
+void Level::forEachQuad(const std::function<void(Vec3, Vec3, Vec3, Vec3)>& quad) const {
     const float s = kCellSize;
     for (int z = 0; z < d_; ++z)
         for (int x = 0; x < w_; ++x) {
@@ -106,7 +110,6 @@ void Level::buildCollision(CollisionWorld& world) const {
             side(x - 1, z, {x0, 0, z1}, {x0, 0, z0});
             side(x + 1, z, {x1, 0, z0}, {x1, 0, z1});
         }
-    world.build();
 }
 
 static bool rayAabb(const Vec3& o, const Vec3& d, const Aabb& b, float& tHit, Vec3& n) {

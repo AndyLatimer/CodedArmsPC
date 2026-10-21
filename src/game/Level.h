@@ -8,6 +8,7 @@
 // by a reimplementation of the original algorithm once its data is analysed.
 #include "core/MathUtil.h"
 #include "game/Collision.h"
+#include <functional>
 #include <vector>
 
 namespace ca {
@@ -37,6 +38,7 @@ public:
 
     // Emits every visible surface (floor, wall sides, block tops/sides) as triangles.
     void buildCollision(CollisionWorld& world) const;
+    void forEachQuad(const std::function<void(Vec3, Vec3, Vec3, Vec3)>& emit) const;
 
     // Solid boxes overlapping the given region (walls and blocks).
     void solidsInRegion(const Aabb& region, std::vector<Aabb>& out) const;

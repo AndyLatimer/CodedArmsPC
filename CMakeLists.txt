@@ -32,10 +32,19 @@ add_library(ca_engine STATIC
   src/game/Player.cpp
   src/game/Collision.cpp
   src/assets/Formats.cpp
+  src/game/OriginalWorld.cpp
+  src/render/GL.cpp
+  src/render/Renderer.cpp
 )
 target_include_directories(ca_engine PUBLIC src)
 target_include_directories(ca_engine SYSTEM PUBLIC third_party/stb)
 target_link_libraries(ca_engine PUBLIC SDL2::SDL2)
+
+add_executable(CodedArms WIN32 src/main.cpp src/App.cpp)
+if(TARGET SDL2::SDL2main)
+  target_link_libraries(CodedArms PRIVATE SDL2::SDL2main)
+endif()
+target_link_libraries(CodedArms PRIVATE ca_engine)
 
 add_executable(ca_assetcheck tools/assetcheck.cpp)
 target_link_libraries(ca_assetcheck PRIVATE ca_engine)
@@ -49,5 +58,7 @@ target_link_libraries(test_core PRIVATE ca_engine)
 add_test(NAME core COMMAND test_core)
 
 if(MINGW)
-  target_link_options(test_core PRIVATE -static-libgcc -static-libstdc++ -static)
+  foreach(t CodedArms ca_assetcheck test_core)
+    target_link_options(${t} PRIVATE -static-libgcc -static-libstdc++ -static)
+  endforeach()
 endif()
