@@ -30,9 +30,14 @@ add_library(ca_engine STATIC
   src/platform/Input.cpp
   src/game/Level.cpp
   src/game/Player.cpp
+  src/assets/Formats.cpp
 )
-target_include_directories(ca_engine PUBLIC src third_party/stb)
+target_include_directories(ca_engine PUBLIC src)
+target_include_directories(ca_engine SYSTEM PUBLIC third_party/stb)
 target_link_libraries(ca_engine PUBLIC SDL2::SDL2)
+
+add_executable(ca_assetcheck tools/assetcheck.cpp)
+target_link_libraries(ca_assetcheck PRIVATE ca_engine)
 
 enable_testing()
 add_executable(test_core tests/test_core.cpp)
