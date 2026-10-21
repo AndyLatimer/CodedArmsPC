@@ -80,6 +80,35 @@ void Level::solidsInRegion(const Aabb& region, std::vector<Aabb>& out) const {
     out.push_back({{region.min.x - 1, -10.0f, region.min.z - 1}, {region.max.x + 1, 0.0f, region.max.z + 1}});
 }
 
+void Level::buildCollision(CollisionWorld& world) const {
+    world.clear();
+    auto quad = [&](Vec3 a, Vec3 b, Vec3 c, Vec3 d) {
+        world.addTriangle(a, b, c);
+        world.addTriangle(a, c, d);
+    };
+    const float s = kCellSize;
+    for (int z = 0; z < d_; ++z)
+        for (int x = 0; x < w_; ++x) {
+            Cell c = at(x, z);
+            if (c == Cell::Wall) continue;
+            float x0 = x * s, x1 = x0 + s, z0 = z * s, z1 = z0 + s;
+            float top = c == Cell::Block ? kBlockHeight : 0.0f;
+            quad({x0, top, z0}, {x0, top, z1}, {x1, top, z1}, {x1, top, z0});
+            // Side faces toward this open cell from taller neighbours.
+            auto side = [&](int nx, int nz, Vec3 a, Vec3 b) {
+                Cell n = at(nx, nz);
+                float h = n == Cell::Wall ? kWallHeight : (n == Cell::Block ? kBlockHeight : 0.0f);
+                if (h <= top) return;
+                quad({a.x, top, a.z}, {b.x, top, b.z}, {b.x, h, b.z}, {a.x, h, a.z});
+            };
+            side(x, z - 1, {x0, 0, z0}, {x1, 0, z0});
+            side(x, z + 1, {x1, 0, z1}, {x0, 0, z1});
+            side(x - 1, z, {x0, 0, z1}, {x0, 0, z0});
+            side(x + 1, z, {x1, 0, z0}, {x1, 0, z1});
+        }
+    world.build();
+}
+
 static bool rayAabb(const Vec3& o, const Vec3& d, const Aabb& b, float& tHit, Vec3& n) {
     float tmin = 0, tmax = 1e30f;
     Vec3 nmin;

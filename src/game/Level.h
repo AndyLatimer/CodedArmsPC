@@ -7,6 +7,7 @@
 // stand-in so the movement/collision code can be built and tested. It will be replaced
 // by a reimplementation of the original algorithm once its data is analysed.
 #include "core/MathUtil.h"
+#include "game/Collision.h"
 #include <vector>
 
 namespace ca {
@@ -33,6 +34,9 @@ public:
 
     Vec3 spawnPoint() const { return spawn_; }
     Vec3 goalPoint() const { return goal_; }
+
+    // Emits every visible surface (floor, wall sides, block tops/sides) as triangles.
+    void buildCollision(CollisionWorld& world) const;
 
     // Solid boxes overlapping the given region (walls and blocks).
     void solidsInRegion(const Aabb& region, std::vector<Aabb>& out) const;

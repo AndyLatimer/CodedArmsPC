@@ -97,17 +97,19 @@ static Level makeRoom() {
 
 static void testWalkAndWall() {
     Level l = makeRoom();
+    CollisionWorld w;
+    l.buildCollision(w);
     Player p;
     p.spawn({14, 0, 14}, 0); // centre, facing -Z
     PlayerInput in;
     in.move = {0, 1};
     const float dt = 1.0f / 60.0f;
-    for (int i = 0; i < 60; ++i) p.tick(in, l, dt);
+    for (int i = 0; i < 60; ++i) p.tick(in, w, dt);
     // 1 s of walking at 5 m/s, minus a short acceleration phase.
     float moved = 14 - p.position().z;
     CHECK(moved > 4.5f && moved < 5.01f);
     CHECK(p.grounded());
-    for (int i = 0; i < 600; ++i) p.tick(in, l, dt);
+    for (int i = 0; i < 600; ++i) p.tick(in, w, dt);
     // Wall row z=0 spans [0,4]; the body must stop at 4 + radius.
     CHECK(std::fabs(p.position().z - (4.0f + p.params.radius)) < 0.01f);
 }
@@ -115,20 +117,22 @@ static void testWalkAndWall() {
 static void testJumpOntoBlock() {
     Level l = makeRoom();
     l.set(3, 2, Cell::Block); // block spanning z in [8,12], x in [12,16]
+    CollisionWorld w;
+    l.buildCollision(w);
     Player p;
     p.spawn({14, 0, 14}, 0);
     PlayerInput in;
     const float dt = 1.0f / 60.0f;
     // Walking into the block without jumping: blocked at z = 12 + radius.
     in.move = {0, 1};
-    for (int i = 0; i < 120; ++i) p.tick(in, l, dt);
+    for (int i = 0; i < 120; ++i) p.tick(in, w, dt);
     CHECK(std::fabs(p.position().z - (12.0f + p.params.radius)) < 0.01f);
     CHECK(p.position().y == 0.0f);
     // Jump while pushing forward: lands on top (y = 1).
     in.jump = true;
-    p.tick(in, l, dt);
+    p.tick(in, w, dt);
     in.jump = false;
-    for (int i = 0; i < 60; ++i) p.tick(in, l, dt);
+    for (int i = 0; i < 60; ++i) p.tick(in, w, dt);
     CHECK(std::fabs(p.position().y - Level::kBlockHeight) < 1e-4f);
     CHECK(p.grounded());
 }
@@ -137,6 +141,8 @@ static void testFixedStepIndependence() {
     // The same 2 s of input yields the same result regardless of render frame rate,
     // because simulation always advances in fixed 1/60 s ticks.
     Level l = makeRoom();
+    CollisionWorld w;
+    l.buildCollision(w);
     auto run = [&](double frameDt) {
         Player p;
         p.spawn({14, 0, 20}, 0);
@@ -146,7 +152,7 @@ static void testFixedStepIndependence() {
         while (t < 2.0) {
             acc += frameDt;
             t += frameDt;
-            while (acc >= 1.0 / 60.0) { p.tick(in, l, 1.0f / 60.0f); acc -= 1.0 / 60.0; }
+            while (acc >= 1.0 / 60.0) { p.tick(in, w, 1.0f / 60.0f); acc -= 1.0 / 60.0; }
         }
         return p.position();
     };

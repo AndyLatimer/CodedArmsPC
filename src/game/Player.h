@@ -5,7 +5,7 @@
 // All tuning constants are PROVISIONAL (not yet measured from the original game).
 // They are grouped in MoveParams so they can be replaced by verified values.
 #include "core/MathUtil.h"
-#include "game/Level.h"
+#include "game/Collision.h"
 
 namespace ca {
 
@@ -19,6 +19,7 @@ struct MoveParams {
     float radius = 0.4f;
     float height = 1.7f;
     float eyeHeight = 1.55f;
+    float stepHeight = 0.35f;     // ledges up to this height are climbed automatically
 };
 
 struct PlayerInput {
@@ -30,7 +31,7 @@ struct PlayerInput {
 class Player {
 public:
     void spawn(const Vec3& feet, float yaw);
-    void tick(const PlayerInput& in, const Level& level, float dt);
+    void tick(const PlayerInput& in, const CollisionWorld& world, float dt);
 
     Vec3 position() const { return pos_; }          // feet
     Vec3 previousPosition() const { return prevPos_; }
@@ -42,8 +43,6 @@ public:
     MoveParams params;
 
 private:
-    void moveAxis(int axis, float delta, const Level& level);
-    Aabb bounds() const;
 
     Vec3 pos_, prevPos_, vel_;
     bool grounded_ = false;

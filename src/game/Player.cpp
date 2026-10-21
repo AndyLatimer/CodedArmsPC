@@ -11,21 +11,17 @@ void Player::spawn(const Vec3& feet, float yaw_) {
     grounded_ = true;
 }
 
-Aabb Player::bounds() const {
-    return {{pos_.x - params.radius, pos_.y, pos_.z - params.radius},
-            {pos_.x + params.radius, pos_.y + params.height, pos_.z + params.radius}};
-}
-
-void Player::tick(const PlayerInput& in, const Level& level, float dt) {
+void Player::tick(const PlayerInput& in, const CollisionWorld& world, float dt) {
     prevPos_ = pos_;
+    const MoveParams& P = params;
 
     Vec3 fwd{std::sin(yaw), 0, -std::cos(yaw)};
     Vec3 right{std::cos(yaw), 0, std::sin(yaw)};
-    float speed = params.walkSpeed * (in.aiming ? params.aimSpeedScale : 1.0f);
+    float speed = P.walkSpeed * (in.aiming ? P.aimSpeedScale : 1.0f);
     Vec3 wish = (fwd * in.move.y + right * in.move.x) * speed;
 
     // Accelerate horizontal velocity toward the wish velocity.
-    float accel = (grounded_ ? params.groundAccel : params.airAccel) * dt;
+    float accel = (grounded_ ? P.groundAccel : P.airAccel) * dt;
     Vec3 dv{wish.x - vel_.x, 0, wish.z - vel_.z};
     float dl = length(dv);
     if (dl > accel) dv = dv * (accel / dl);
@@ -33,43 +29,67 @@ void Player::tick(const PlayerInput& in, const Level& level, float dt) {
     vel_.z += dv.z;
 
     if (grounded_ && in.jump) {
-        vel_.y = params.jumpVelocity;
+        vel_.y = P.jumpVelocity;
         grounded_ = false;
     }
-    vel_.y -= params.gravity * dt;
+    vel_.y -= P.gravity * dt;
 
-    moveAxis(0, vel_.x * dt, level);
-    moveAxis(2, vel_.z * dt, level);
-    grounded_ = false;
-    moveAxis(1, vel_.y * dt, level);
-}
+    // Horizontal: move, then push the body spheres (knee above step height, and head)
+    // out of geometry, keeping only the horizontal part of the correction.
+    pos_.x += vel_.x * dt;
+    pos_.z += vel_.z * dt;
+    const float sphereY[2] = {P.stepHeight + P.radius, P.height - P.radius};
+    for (int iter = 0; iter < 3; ++iter) {
+        bool any = false;
+        for (float sy : sphereY) {
+            Vec3 c = pos_ + Vec3{0, sy, 0};
+            Vec3 before = c;
+            Vec3 n;
+            if (world.pushOutSphere(c, P.radius, &n)) {
+                Vec3 corr{c.x - before.x, 0, c.z - before.z};
+                if (length(corr) > 1e-6f) {
+                    pos_.x += corr.x;
+                    pos_.z += corr.z;
+                    Vec3 hn = normalize(corr);
+                    float into = vel_.x * hn.x + vel_.z * hn.z;
+                    if (into < 0) { vel_.x -= hn.x * into; vel_.z -= hn.z * into; }
+                    any = true;
+                }
+            }
+        }
+        if (!any) break;
+    }
 
-// Axis-separated sweep: move, then push out of any overlapping solid along that axis.
-void Player::moveAxis(int axis, float delta, const Level& level) {
-    if (delta == 0.0f && axis != 1) return;
-    (&pos_.x)[axis] += delta;
-    Aabb b = bounds();
-    std::vector<Aabb> solids;
-    Aabb query{{b.min.x - 0.1f, b.min.y - 0.1f, b.min.z - 0.1f}, {b.max.x + 0.1f, b.max.y + 0.1f, b.max.z + 0.1f}};
-    level.solidsInRegion(query, solids);
-    const float eps = 1e-4f;
-    for (const Aabb& s : solids) {
-        b = bounds();
-        bool overlap = b.min.x < s.max.x && b.max.x > s.min.x && b.min.y < s.max.y && b.max.y > s.min.y &&
-                       b.min.z < s.max.z && b.max.z > s.min.z;
-        if (!overlap) continue;
-        float& p = (&pos_.x)[axis];
-        if (axis == 1) {
-            if (delta <= 0) { p = s.max.y; grounded_ = true; }
-            else p = s.min.y - params.height - eps;
-            (&vel_.x)[1] = 0;
-        } else {
-            float half = params.radius;
-            if (delta > 0) p = (&s.min.x)[axis] - half - eps;
-            else p = (&s.max.x)[axis] + half + eps;
-            (&vel_.x)[axis] = 0;
+    // Vertical: ceiling, then ground probe from step height (snaps down small ledges
+    // while grounded so walking down stairs does not become falling).
+    float dy = vel_.y * dt;
+    if (dy > 0) {
+        float t;
+        Vec3 n;
+        Vec3 head = pos_ + Vec3{0, P.height, 0};
+        if (world.raycast(head, {0, 1, 0}, dy + 0.01f, t, n)) {
+            dy = std::max(0.0f, t - 0.01f);
+            vel_.y = 0;
         }
     }
+    bool wasGrounded = grounded_;
+    grounded_ = false;
+    if (dy <= 0) {
+        float probe = P.stepHeight + (-dy) + (wasGrounded ? P.stepHeight : 0.0f);
+        float t;
+        Vec3 n;
+        Vec3 from = pos_ + Vec3{0, P.stepHeight, 0};
+        if (world.raycast(from, {0, -1, 0}, probe, t, n) && n.y > 0.5f) {
+            float groundY = from.y - t;
+            if (pos_.y + dy <= groundY + 1e-4f || wasGrounded) {
+                pos_.y = groundY;
+                vel_.y = 0;
+                grounded_ = true;
+                return;
+            }
+        }
+    }
+    pos_.y += dy;
 }
 
 } // namespace ca

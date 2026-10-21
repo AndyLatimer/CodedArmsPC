@@ -30,6 +30,7 @@ add_library(ca_engine STATIC
   src/platform/Input.cpp
   src/game/Level.cpp
   src/game/Player.cpp
+  src/game/Collision.cpp
   src/assets/Formats.cpp
 )
 target_include_directories(ca_engine PUBLIC src)
