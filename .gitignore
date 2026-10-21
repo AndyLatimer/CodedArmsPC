@@ -1,0 +1,6 @@
+build/
+dist/
+*.log
+screenshots/
+config.ini
+third_party/SDL2-*/
