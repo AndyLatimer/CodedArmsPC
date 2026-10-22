@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "psp/host.h"
 #include "psp/memory.h"
@@ -51,15 +52,23 @@ extern "C" void ca_hook_player_view(Ctx* c) {
         }
     }
     if (trace) std::fprintf(stderr, "[HOOK] view=%08x input=%08x yaw=%f pitch=%f\n", view, input, rdf(view + 0x51C), rdf(view + 0x524));
-    std::lock_guard<std::mutex> lk(psp::host::g_aim.m);
-    if (!psp::host::g_aim.enabled || (psp::host::g_aim.yaw == 0 && psp::host::g_aim.pitch == 0)) return;
-    float yaw = rdf(view + 0x51C) - psp::host::g_aim.yaw; // mouse right turns right: the yaw decreases
-    float pitch = rdf(view + 0x524) + psp::host::g_aim.pitch; // mouse up looks up: the pitch decreases
+    auto& aim = psp::host::g_aim;
+    std::lock_guard<std::mutex> lk(aim.m);
+    aim.lastUpdateUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::steady_clock::now().time_since_epoch()).count();
+    const float oldPitch = rdf(view + 0x524);
+    aim.gamePitch = oldPitch;
+    if (!aim.enabled || (aim.yaw == 0 && aim.pitch == 0)) return;
+    float yaw = rdf(view + 0x51C) - aim.yaw; // mouse right turns right: the yaw decreases
+    float pitch = oldPitch + aim.pitch;      // mouse up looks up: the pitch decreases
     yaw = std::remainder(yaw, 2 * kPi);
     pitch = std::fmax(-kPitchLimit, std::fmin(kPitchLimit, pitch));
     wrf(view + 0x51C, yaw);
     wrf(view + 0x524, pitch);
-    psp::host::g_aim.yaw = psp::host::g_aim.pitch = 0;
+    aim.appliedYaw += aim.yaw;
+    aim.appliedPitch += pitch - oldPitch; // what the clamp let through
+    aim.gamePitch = pitch;
+    aim.yaw = aim.pitch = 0;
 }
 
 // Frame rate --------------------------------------------------------------------------------
@@ -127,6 +136,24 @@ extern "C" void ca_hook_frame_work_done(Ctx*) {
 
 extern "C" void ca_hook_frame_start(Ctx* c) {
     g_fr.frameStart = std::chrono::steady_clock::now();
+    // Debugging: CA_PROBE=addr,addr,... logs those words (as int and float) at every frame.
+    static const char* probe = std::getenv("CA_PROBE");
+    if (probe) {
+        static const auto t0 = std::chrono::steady_clock::now();
+        std::string line = "[PROBE] t=" + std::to_string(std::chrono::duration<double, std::milli>(g_fr.frameStart - t0).count()) +
+                           " vbl=" + std::to_string(c->r[4]) + " pad=" + std::to_string(psp::host::g_ctrl.buttons.load()) +
+                           " stick=" + std::to_string(psp::host::g_ctrl.ly.load());
+        for (const char* p = probe; *p;) {
+            char* end = nullptr;
+            const uint32_t a = (uint32_t)std::strtoul(p, &end, 16);
+            char b[64];
+            std::snprintf(b, sizeof b, " %08x=%d/%g", a, (int32_t)psp::read32(a), rdf(a));
+            line += b;
+            p = *end == ',' ? end + 1 : end;
+            if (end == p && *p == 0) break;
+        }
+        std::fprintf(stderr, "%s\n", line.c_str());
+    }
     const int cap = psp::host::g_frameInterval.load();
     if (cap <= 0 || !g_fr.settings || g_fr.requested <= cap) return;
     const int n = g_fr.effective;

@@ -43,9 +43,10 @@ El código generado se crea en `build/` a partir de la ISO del usuario y nunca s
 - [x] [RE] **Apuntado directo con ratón y stick derecho**: hook del recompilador en la actualización de la vista del jugador (yaw `view+0x51C`, pitch `view+0x524`, límite del propio juego); sensibilidad X/Y, inversión, zona muerta, curva. Verificado en la misión de entrenamiento.
 - [x] [NUEVO] **Panorámico Hor+** (21:9, 32:9…): la escena 3D se amplía a los lados, el HUD queda centrado, los fundidos/fondos a pantalla completa se estiran, los vídeos van centrados. Verificado a 21:9.
 - [x] Corrección: el alfa del framebuffer de la PSP es el stencil (solo lo cambian ZERO/REPLACE): el brillo (glow) de la misión coincide con PPSSPP.
-- [x] [RE] **60 fps** (el original va a 20 en las misiones): hook en el fijador de intervalo del juego; misma velocidad de juego verificada; baja solo a 30 si el PC no llega (`[video] frame_rate`).
+- [x] [NUEVO] **Cámara suave**: entre los fotogramas del juego (20 fps, como el original) se redibuja el último con la cámara girada por el ratón, a la frecuencia del monitor (`[video] smooth_camera`).
+- [x] [RE] Intervalo de fotogramas del juego localizado; 30/60 fps como opción experimental (`[video] game_frame_rate`): **cambian la velocidad del jugador** (medido, TECHNICAL_NOTES §15), por eso no es el valor por defecto.
 - [x] [NUEVO] **Teclas de PC en las ayudas de botones** (configuración de teclas, tipo de control, pies de pantalla) según las asignaciones de `config.ini` (`[video] pc_button_hints`).
-- [x] Audio sin cortes: el juego se sincroniza con el reloj de la tarjeta de sonido (0 huecos frente a ~4/min).
+- [x] Audio sin cortes: el juego se sincroniza con el reloj de la tarjeta de sonido (0 huecos frente a ~4/min); la espera por la GPU ya no para el hilo de audio; búfer adaptable ante tirones.
 - [x] Rendimiento: caché de teselado de parches (coste ÷4) y espera de vblank corregida.
 
 ### Herramientas
@@ -70,5 +71,5 @@ un motor FPS nuevo). Se conserva por sus herramientas y pruebas; ver `TECHNICAL_
 - 2026-10-21: Se permite copiar código de PPSSPP; el proyecto pasa a GPL-2.0-or-later (libkirk es GPL-3.0+, por lo que los binarios que la enlazan son GPLv3).
 - 2026-10-22: La E/S asíncrona sigue la temporización de PPSSPP (necesaria para el orden de carga del juego).
 - 2026-10-22: Tarjeta de memoria simulada de 1 GB (con 16 GB el juego avisa de falta de espacio).
-- 2026-10-22: 60 fps por defecto modificando el intervalo del propio juego (no interpolación): la lógica sigue siendo la original.
+- 2026-10-22: Intervalo original por defecto (20 fps en misiones) y cámara con rotación tardía: a 30/60 fps el jugador se mueve 1,5 veces más rápido.
 - 2026-10-22: Renderizador propio en lugar de enlazar la GPU de PPSSPP (está integrada en su núcleo monolítico); se copian sus decodificadores y fórmulas.

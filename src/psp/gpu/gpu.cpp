@@ -2,7 +2,9 @@
 #include "psp/gpu/button_glyphs.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <atomic>
@@ -18,6 +20,7 @@
 #include "psp/gpu/shaders.h"
 #include "psp/gpu/texture_decoder.h"
 #include "psp/gpu/vertex_decoder.h"
+#include "psp/host.h"
 #include "psp/kernel.h"
 #include "psp/memory.h"
 #include "render/GL.h"
@@ -30,7 +33,7 @@ namespace {
 
 // CA_PERF=1: per-second timing of the renderer stages (microseconds) on stderr.
 struct PerfCounters {
-    std::atomic<uint64_t> flips{0}, waitUs{0}, patchUs{0}, drawUs{0}, texUs{0}, execUs{0}, presents{0}, patches{0}, draws{0}, verts{0};
+    std::atomic<uint64_t> flips{0}, waitUs{0}, patchUs{0}, drawUs{0}, texUs{0}, execUs{0}, presents{0}, replays{0}, patches{0}, draws{0}, verts{0};
 } g_perf;
 const bool g_perfOn = std::getenv("CA_PERF") != nullptr;
 struct ScopedUs {
@@ -44,7 +47,8 @@ void perfReport() {
     auto now = std::chrono::steady_clock::now();
     if (now - last < std::chrono::seconds(1)) return;
     last = now;
-    std::fprintf(stderr, "[PERF] flips=%llu queue-wait=%llums ", (unsigned long long)g_perf.flips.exchange(0), (unsigned long long)g_perf.waitUs.exchange(0) / 1000);
+    std::fprintf(stderr, "[PERF] flips=%llu replays=%llu queue-wait=%llums ", (unsigned long long)g_perf.flips.exchange(0),
+                 (unsigned long long)g_perf.replays.exchange(0), (unsigned long long)g_perf.waitUs.exchange(0) / 1000);
     std::fprintf(stderr, "presents=%llu draws=%llu patches=%llu verts=%llu | draw=%llums patch=%llums tex=%llums exec=%llums\n",
                  (unsigned long long)g_perf.presents.exchange(0), (unsigned long long)g_perf.draws.exchange(0),
                  (unsigned long long)g_perf.patches.exchange(0), (unsigned long long)g_perf.verts.exchange(0),
@@ -125,6 +129,11 @@ struct Frame {
     std::vector<uint8_t> blob;
     std::vector<Ubo> ubos;
     uint64_t number = 0;
+    // Late camera rotation (renderReplay): whether the frame drew anything, and the aim the
+    // game had applied when it started drawing.
+    bool drawn = false;
+    double aimYaw = 0, aimPitch = 0;
+    float gamePitch = 0;
 };
 
 constexpr int kFloatsPerVertex = 12;
@@ -196,11 +205,13 @@ public:
         displayFormat_ = fmt;
         present();
         vblanksSincePresent_ = 0;
+        vblanksSinceFlip_ = 0;
     }
     void vblank() {
         std::lock_guard<std::recursive_mutex> lk(mutex_);
-        // Games that draw into a single displayed buffer never call SetFrameBuf again.
-        if (++vblanksSincePresent_ >= 2 && displayAddr_) {
+        // Games that draw into a single displayed buffer never call SetFrameBuf again. While
+        // the game flips, each recorded frame holds exactly one picture (needed for replays).
+        if (++vblanksSinceFlip_ >= 6 && ++vblanksSincePresent_ >= 2 && displayAddr_) {
             present();
             vblanksSincePresent_ = 0;
         }
@@ -226,7 +237,7 @@ private:
     std::unordered_map<uint64_t, TexEntry> textures_;
     uint64_t texEpoch_ = 0;
     uint32_t displayAddr_ = 0, displayStride_ = 512, displayFormat_ = 3;
-    int vblanksSincePresent_ = 0;
+    int vblanksSincePresent_ = 0, vblanksSinceFlip_ = 0;
     bool premulBlend_ = false;
     bool alphaOverride_ = false;
     float alphaOut_ = 0;
@@ -357,10 +368,10 @@ private:
         }
         frame_->number = ++frameNumber_;
         {
-            ScopedUs waitPerf(g_perf.waitUs);
+            // Back-pressure is applied by throttle() on the flipping guest thread, as a kernel
+            // wait, so the game's other threads (audio) keep running meanwhile.
             std::unique_lock<std::mutex> lk(g_queueMutex);
-            // Back-pressure: the guest waits for the renderer like for a real GPU.
-            g_queueCv.wait_for(lk, std::chrono::milliseconds(200), [] { return g_queue.size() < 3; });
+            g_queueCv.wait_for(lk, std::chrono::milliseconds(200), [] { return g_queue.size() < 8; }); // safety cap
             g_queue.push_back(std::move(frame_));
         }
         g_queueCv.notify_all();
@@ -1061,6 +1072,13 @@ void Recorder::draw(uint32_t data) {
 
 void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasColor) {
     const int count = (int)vin.size();
+    if (!frame_->drawn) {
+        frame_->drawn = true;
+        std::lock_guard<std::mutex> lk(host::g_aim.m);
+        frame_->aimYaw = host::g_aim.appliedYaw;
+        frame_->aimPitch = host::g_aim.appliedPitch;
+        frame_->gamePitch = host::g_aim.gamePitch;
+    }
     FboInfo& target = prepareTarget();
     const bool clear = reg(CMD_CLEARMODE) & 1;
 
@@ -1201,6 +1219,8 @@ struct Exec {
     int bound = 0;
     PresentInfo last;
     int lastFbo = 0;
+    std::unique_ptr<Frame> replay; // the last frame that drew a picture
+    double replayYaw = 1e9, replayPitch = 1e9; // rotation of the last replay
 } g_exec;
 
 GLuint compile(GLenum type, const char* src) {
@@ -1376,11 +1396,14 @@ void debugFrame(const Frame& fr) {
     }
 }
 
-void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented) {
+void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented, const std::vector<Ubo>* replayUbos = nullptr) {
     ScopedUs perf(g_perf.execUs);
-    g_perf.verts += fr.verts.size() / kFloatsPerVertex;
-    if (g_perfOn) perfReport();
-    debugFrame(fr);
+    const std::vector<Ubo>& ubos = replayUbos ? *replayUbos : fr.ubos;
+    if (!replayUbos) {
+        g_perf.verts += fr.verts.size() / kFloatsPerVertex;
+        if (g_perfOn) perfReport();
+        debugFrame(fr);
+    }
     glBindVertexArray(g_exec.vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_exec.vbo);
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(fr.verts.size() * sizeof(float)), fr.verts.data(), GL_STREAM_DRAW);
@@ -1473,7 +1496,7 @@ void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented) {
                 if (op.st.texKind == 1) glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, op.st.maxLevel);
             }
             glBindBuffer(GL_UNIFORM_BUFFER, g_exec.ubo);
-            glBufferData(GL_UNIFORM_BUFFER, sizeof(Ubo), &fr.ubos[op.ubo], GL_STREAM_DRAW);
+            glBufferData(GL_UNIFORM_BUFFER, sizeof(Ubo), &ubos[op.ubo], GL_STREAM_DRAW);
             glDrawArrays(op.glMode, (GLint)op.first, (GLsizei)op.count);
             break;
         }
@@ -1511,6 +1534,17 @@ void install(const Settings& s) {
 bool installed() { return g_installed; }
 void setDisplay(uint32_t top, uint32_t stride, uint32_t fmt) { if (g_recorder) g_recorder->setDisplay(top, stride, fmt); }
 void vblank() { if (g_recorder) g_recorder->vblank(); }
+
+void throttle() {
+    if (!g_recorder || psp::kernel::currentThreadId() == 0 || psp::kernel::inInterrupt()) return;
+    auto ready = [] {
+        std::lock_guard<std::mutex> lk(g_queueMutex);
+        return g_queue.size() < 3;
+    };
+    if (ready()) return;
+    ScopedUs waitPerf(g_perf.waitUs);
+    psp::kernel::waitUntil(ready, 200000);
+}
 void notifyMemoryWrite(uint32_t addr, uint32_t size) { if (g_recorder) g_recorder->memoryWrite(addr, size); }
 
 bool renderInit() {
@@ -1573,12 +1607,112 @@ bool renderPump(PresentInfo& out, int timeoutMs) {
             g_queue.pop_front();
         }
         g_queueCv.notify_all();
+        psp::kernel::notifyStateChanged(); // a guest thread may be waiting in throttle()
         execFrame(*fr, out, presented);
+        if (presented && fr->drawn) {
+            g_exec.replay = std::move(fr);
+            g_exec.replayYaw = g_exec.replayPitch = 0;
+        }
         if (presented) break;
     }
     if (presented) g_exec.last = out;
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     return presented;
+}
+
+// ---- late camera rotation ----------------------------------------------------------------
+// The game renders missions at 20 fps. Between its frames the last frame is drawn again with
+// the camera turned by the aim the game has not shown yet, so mouse look follows the display's
+// refresh rate while the game itself runs unchanged.
+
+namespace {
+using Mat4 = std::array<float, 16>; // column-major, as in the uniform block
+
+Mat4 mul(const Mat4& a, const Mat4& b) {
+    Mat4 r{};
+    for (int c = 0; c < 4; ++c)
+        for (int rr = 0; rr < 4; ++rr) {
+            float v = 0;
+            for (int k = 0; k < 4; ++k) v += a[k * 4 + rr] * b[c * 4 + k];
+            r[c * 4 + rr] = v;
+        }
+    return r;
+}
+Mat4 identity() { Mat4 m{}; m[0] = m[5] = m[10] = m[15] = 1; return m; }
+Mat4 translate(float x, float y, float z) { Mat4 m = identity(); m[12] = x; m[13] = y; m[14] = z; return m; }
+Mat4 rotX(float a) { Mat4 m = identity(); m[5] = std::cos(a); m[6] = std::sin(a); m[9] = -std::sin(a); m[10] = std::cos(a); return m; }
+Mat4 rotY(float a) { Mat4 m = identity(); m[0] = std::cos(a); m[2] = -std::sin(a); m[8] = std::sin(a); m[10] = std::cos(a); return m; }
+
+// Signs relating the game's yaw/pitch to rotations of the view (checked against the frames the
+// game renders after applying the same aim).
+float g_replayYawSign = 1, g_replayPitchSign = 1;
+} // namespace
+
+bool renderReplayDelta(float dyaw, float dpitch, PresentInfo& out) {
+    if (!g_exec.replay) return false;
+    Frame& fr = *g_exec.replay;
+    // The camera: the view matrix of most 3D draws.
+    std::unordered_map<uint64_t, int> counts;
+    uint64_t camKey = 0;
+    int best = 0;
+    for (const Op& op : fr.ops) {
+        if (op.type != OP_DRAW) continue;
+        const Ubo& u = fr.ubos[op.ubo];
+        if (u.vpScale[3] != 0) continue; // through mode (2D)
+        const uint64_t k = hashBytes(reinterpret_cast<const uint8_t*>(u.view), sizeof u.view);
+        if (++counts[k] > best) { best = counts[k]; camKey = k; }
+    }
+    if (best < 8) return false;
+    std::vector<Ubo> ubos = fr.ubos;
+    for (Ubo& u : ubos) {
+        if (u.vpScale[3] != 0 || hashBytes(reinterpret_cast<const uint8_t*>(u.view), sizeof u.view) != camKey) continue;
+        Mat4 v;
+        std::memcpy(v.data(), u.view, sizeof u.view);
+        // Camera position: c = -R^T t.
+        const float cx = -(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]);
+        const float cy = -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]);
+        const float cz = -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14]);
+        // Yaw about the world's up axis through the camera, pitch about the camera's right axis.
+        const Mat4 world = mul(translate(cx, cy, cz), mul(rotY(g_replayYawSign * dyaw), translate(-cx, -cy, -cz)));
+        const Mat4 r = mul(rotX(g_replayPitchSign * dpitch), mul(v, world));
+        std::memcpy(u.view, r.data(), sizeof u.view);
+    }
+    bool presented = false;
+    execFrame(fr, out, presented, &ubos);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (presented) g_exec.last = out;
+    return presented;
+}
+
+bool renderReplay(PresentInfo& out) {
+    if (!g_exec.replay) return false;
+    {
+        std::lock_guard<std::mutex> lk(g_queueMutex);
+        if (!g_queue.empty()) return false; // the game's own frames come first
+    }
+    const Frame& fr = *g_exec.replay;
+    double dy, dp;
+    {
+        auto& aim = host::g_aim;
+        std::lock_guard<std::mutex> lk(aim.m);
+        const uint64_t now = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                                 std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (!aim.enabled || now - aim.lastUpdateUs > 200000) return false; // not in gameplay
+        const float pending = std::fmax(-1.309f, std::fmin(1.309f, aim.gamePitch + aim.pitch)) - aim.gamePitch;
+        dy = aim.appliedYaw + aim.yaw - fr.aimYaw;
+        dp = aim.appliedPitch + pending - fr.aimPitch;
+    }
+    if (std::fabs(dy - g_exec.replayYaw) < 1e-5 && std::fabs(dp - g_exec.replayPitch) < 1e-5) return false;
+    if (!renderReplayDelta((float)dy, (float)dp, out)) return false;
+    ++g_perf.replays;
+    g_exec.replayYaw = dy;
+    g_exec.replayPitch = dp;
+    return true;
+}
+
+void setReplaySigns(float yaw, float pitch) {
+    g_replayYawSign = yaw;
+    g_replayPitchSign = pitch;
 }
 
 bool readPresented(const PresentInfo& p, std::vector<uint32_t>& rgba, int& w, int& h) {

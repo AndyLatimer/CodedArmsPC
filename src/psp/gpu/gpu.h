@@ -23,6 +23,9 @@ void install(const Settings& s);   // becomes the GE renderer
 bool installed();
 void setDisplay(uint32_t topaddr, uint32_t stride, uint32_t pixelFormat); // sceDisplaySetFrameBuf
 void vblank();                                                           // once per vblank
+// Called by the guest thread after a flip: waits (as a kernel wait, other guest threads keep
+// running) while the renderer is more than two frames behind, like a game waiting for the GPU.
+void throttle();
 // The CPU wrote guest memory (e.g. a decoded movie frame into VRAM): framebuffers overlapping
 // it are refreshed from memory before they are next used.
 void notifyMemoryWrite(uint32_t addr, uint32_t size);
@@ -38,6 +41,12 @@ struct PresentInfo {
 // Executes queued frames (waiting up to timeoutMs for one). Returns true when a new frame was
 // presented; `out` then describes it.
 bool renderPump(PresentInfo& out, int timeoutMs);
+// Late camera rotation: draws the last game frame again with the camera turned by the aim the
+// game has not rendered yet (host::g_aim). Returns true when it presented (i.e. the camera moved
+// since the last call and the frame has a 3D camera).
+bool renderReplay(PresentInfo& out);
+bool renderReplayDelta(float dyaw, float dpitch, PresentInfo& out); // debug: explicit rotation
+void setReplaySigns(float yaw, float pitch);                           // debug: sign calibration
 // Reads the visible region of the last presented frame as RGBA8888, top row first.
 bool readPresented(const PresentInfo& p, std::vector<uint32_t>& rgba, int& w, int& h);
 void renderShutdown();

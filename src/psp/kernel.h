@@ -51,6 +51,7 @@ bool callImportByAddress(Ctx* c, uint32_t addr);
 // Scheduling helpers for HLE modules (call with no kernel lock held) -----------------
 uint64_t nowUs();                         // microseconds since boot
 int currentThreadId();
+bool inInterrupt(); // guest interrupt handlers are running (they must not wait)
 // Blocks the calling guest thread until `ready()` returns true or `timeoutUs` (0 = none)
 // elapses. `ready` is evaluated under the kernel lock. Returns false on timeout.
 bool waitUntil(const std::function<bool()>& ready, uint64_t timeoutUs, bool processCallbacks = false);
