@@ -104,6 +104,21 @@ target_include_directories(ca_psp PUBLIC src src/psp/ppsspp third_party/libkirk)
 target_compile_options(ca_psp PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-function -Wno-sign-compare -Wno-missing-field-initializers>)
 find_package(Threads REQUIRED)
 
+# ---- Savedata tests (no game image needed). With -DCA_PPSSPP_DIR=<PPSSPP checkout> the test
+# also checks the encryption and hashes against PPSSPP's own sceChnnlsv.cpp.
+set(CA_PPSSPP_DIR "" CACHE PATH "Optional PPSSPP source checkout used as reference by test_savedata")
+add_executable(test_savedata tests/savedata/test_savedata.cpp src/psp/memory.cpp src/psp/host_dialog.cpp
+  src/psp/ppsspp/ppsspp_utility_compat.cpp src/psp/ppsspp/PSPDialog.cpp src/psp/ppsspp/SavedataParam.cpp
+  src/psp/ppsspp/ParamSFO.cpp src/psp/ppsspp/sceChnnlsv.cpp $<TARGET_OBJECTS:ca_kirk>)
+target_include_directories(test_savedata PRIVATE src src/psp/ppsspp third_party/libkirk)
+if(CA_PPSSPP_DIR)
+  target_sources(test_savedata PRIVATE tests/savedata/ref_chnnlsv.cpp)
+  set_source_files_properties(tests/savedata/ref_chnnlsv.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/tests/savedata/refstub;${CA_PPSSPP_DIR}")
+  target_compile_definitions(test_savedata PRIVATE CA_HAVE_PPSSPP_REF=1)
+endif()
+add_test(NAME savedata COMMAND test_savedata ${CMAKE_BINARY_DIR}/savedata_test_ms)
+
 if(CA_GAME_ISO)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   set(CA_GEN_DIR ${CMAKE_BINARY_DIR}/generated)

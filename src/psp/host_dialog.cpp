@@ -19,6 +19,7 @@ std::deque<DialogInput> g_inputs;
 DialogAutoResponder g_responder;
 std::function<void(const DialogView&)> g_observer;
 std::atomic<bool> g_useController{false};
+uint64_t g_answeredSerial = 0; // the responder answers each screen once
 
 bool sameEntry(const DialogSaveEntry& a, const DialogSaveEntry& b) {
     return a.saveName == b.saveName && a.title == b.title && a.savedataTitle == b.savedataTitle &&
@@ -105,13 +106,16 @@ bool takeDialogInput(DialogInput& out) {
             g_inputs.pop_front();
             return true;
         }
-        if (!g_visible || g_view.busy || !g_responder) return false;
+        if (!g_visible || g_view.busy || !g_responder || g_answeredSerial == g_serial) return false;
         responder = g_responder;
         view = g_view;
         visibleUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now() - g_shownAt).count();
     }
-    return responder(view, visibleUs, out);
+    if (!responder(view, visibleUs, out)) return false;
+    std::lock_guard<std::mutex> lk(g_mutex);
+    g_answeredSerial = view.serial;
+    return true;
 }
 
 } // namespace psp::host

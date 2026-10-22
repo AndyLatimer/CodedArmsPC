@@ -213,6 +213,9 @@ void PSPDialog::StartDraw()
 
 void PSPDialog::EndDraw()
 {
+	// Faded out (FinishFadeOut already took the dialog off the screen): nothing left to show.
+	if (ReadStatus() == SCE_UTILITY_STATUS_FINISHED)
+		return;
 	view_.fade = (int)fadeValue;
 	psp::host::publishDialog(view_);
 }

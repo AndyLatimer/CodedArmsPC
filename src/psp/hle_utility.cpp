@@ -9,6 +9,7 @@
 // INITIALIZE/RUNNING/FINISHED/SHUTDOWN/NONE sequence at the same points.
 //
 // The game imports only the savedata, message and (without InitStart) netconf dialogs.
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -247,6 +248,12 @@ void UtilityDialogShutdown(UtilityDialogType type, int delayUs, int accessPriori
 namespace psp::kernel {
 
 void registerUtilityHle() {
+    // PPSSPP's MemStickSize setting (default 16 GB); see PROGRESS/TECHNICAL notes on why a game
+    // may want a smaller one.
+    if (const char* gb = std::getenv("CA_MEMSTICK_SIZE_GB")) {
+        int v = std::atoi(gb);
+        if (v > 0) g_Config.iMemStickSizeGB = v;
+    }
     __ChnnlsvInit();
     saveDialog = new PSPSaveDialog(UtilityDialogType::SAVEDATA);
     msgDialog = new PSPMsgDialog(UtilityDialogType::MSG);

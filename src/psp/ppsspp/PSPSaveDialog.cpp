@@ -145,6 +145,12 @@ int PSPSaveDialog::Init(int paramAddr) {
 	const char *modeName = mode < ARRAY_SIZE(utilitySavedataTypeNames) ? utilitySavedataTypeNames[mode] : "UNKNOWN";
 	INFO_LOG(Log::sceUtility,"sceUtilitySavedataInitStart(%08x) - %s (%d)", paramAddr, modeName, mode);
 	INFO_LOG(Log::sceUtility,"sceUtilitySavedataInitStart(%08x) : Game key (hex): %s", paramAddr, param.GetKey(param.GetPspParam()).c_str());
+	// CodedArmsPC: the request as the game made it, for comparing with PPSSPP.
+	INFO_LOG(Log::sceUtility, "  size=%d game=%s save=%s list=%08x file=%s buf=%08x/%u data=%u focus=%d secureVersion=%u msFree=%08x msData=%08x utilityData=%08x idList=%08x fileList=%08x sizeInfo=%08x",
+		request.common.size, param.GetGameName(&request).c_str(), StringViewFromFixedSizeField(request.saveName).data() ? std::string(StringViewFromFixedSizeField(request.saveName)).c_str() : "",
+		request.saveNameList.ptr, param.GetFileName(&request).c_str(), request.dataBuf.ptr, request.dataBufSize, request.dataSize, (int)request.focus,
+		request.common.size >= 1536 ? (u32)request.secureVersion : 0u, request.msFree.ptr, request.msData.ptr, request.utilityData.ptr,
+		request.idList.ptr, request.fileList.ptr, request.sizeInfo.ptr);
 
 	yesnoChoice = 1;
 	switch ((SceUtilitySavedataFocus)(u32)param.GetPspParam()->focus) {

@@ -135,6 +135,10 @@ int PSPMsgDialog::Init(unsigned int paramAddr) {
 			flag |= DS_NOSOUND;
 	}
 
+	// CodedArmsPC: the request as the game made it.
+	INFO_LOG(Log::sceUtility, "MsgDialog request: size=%d type=%d errorNum=%08x options=%08x buttonSwap=%d -> flags=%03x",
+		size, (int)messageDialog.type, messageDialog.errorNum, messageDialog.options, (int)messageDialog.common.buttonSwap, flag);
+
 	if (flag & DS_ERRORMSG) {
 		FormatErrorCode(messageDialog.errorNum);
 	} else {
