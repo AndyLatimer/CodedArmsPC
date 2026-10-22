@@ -2,9 +2,10 @@ CODED ARMS - PORT PARA PC (version de desarrollo)
 =================================================
 
 ESTADO: prueba tecnica (Fase B/C). Todavia NO es el juego completo.
-Lo que hay: la geometria y texturas originales de los escenarios cargadas desde
-TU copia del juego, movimiento en primera persona, controles de PC/mando y
-opciones graficas. Aun no hay enemigos, armas ni montaje real de los niveles.
+Lo que hay: niveles montados con la rejilla y las piezas/texturas originales leidas
+de TU copia del juego, movimiento en primera persona, controles de PC/mando y
+opciones graficas. Aun no hay enemigos, armas, puertas, rampas ni ascensores, y la
+pieza concreta de cada celda es aproximada (ver TECHNICAL_NOTES.md).
 
 REQUISITOS
 - Windows 10/11 de 64 bits
@@ -34,8 +35,9 @@ CONTROLES POR DEFECTO (se cambian en config.ini, seccion [bindings])
 Mando (Xbox, PlayStation, XInput): stick izq. mover, stick der. mirar, RT disparar,
 LT apuntar, A saltar, X recargar, B interactuar, Y cambiar arma, Start pausa.
 
-En el menu de pausa, "Stage tile set" cambia entre los kits de escenario originales
-(DG_00 ... DG_08, jefes).
+En el menu de pausa, "Level" cambia entre los 27 niveles pregenerados del juego
+(DG00_L_00P ... DG08_S_00P) y el modo de inspeccion de cada kit de piezas (DG_00...),
+que muestra todas las piezas superpuestas con la camara libre.
 
 CONFIGURACION
 config.ini se crea junto al .exe. Opciones destacadas:

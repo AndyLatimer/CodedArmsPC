@@ -9,8 +9,8 @@ static void usage() {
     std::printf(
         "CodedArms [options]\n"
         "  --iso PATH          your own Coded Arms UMD image (ISO)\n"
-        "  --tileset DG_00     stage tile set to load (DG_00..DG_08, BOSS_00..)\n"
-        "  --scale N           original units per metre (default 4, provisional)\n"
+        "  --tileset NAME      level snapshot (DG00_L_00P...) or tile set to inspect (DG_00...)\n"
+        "  --scale N           original units per metre (default 16, provisional)\n"
         "  --provisional       ignore the game image and use the placeholder level\n"
         "  --autotest DIR      scripted run: writes screenshots to DIR and exits\n");
 }

@@ -21,6 +21,8 @@ Leyenda de procedencia: **[ORIG]** recurso original leído de la ISO del usuario
 - [x] [ORIG] Geometría y texturas originales del escenario DG_00 renderizadas en el motor.
 - [x] [ORIG] Logotipo original CODED ARMS en el menú de pausa.
 - [x] [NUEVO] Movimiento en primera persona WASD + ratón, salto, colisión contra triángulos.
+- [x] [RE] Snapshots RLVB: los 27 niveles pregenerados se montan (9 escenarios) con piezas originales.
+- [x] Compilación de Windows probada con Wine (mismo resultado determinista que Linux).
 
 ### Fase C — Base (en curso)
 - [x] [NUEVO] Bucle de simulación a paso fijo (60 Hz) con interpolación de render; FPS libre o limitado.
@@ -35,7 +37,8 @@ Leyenda de procedencia: **[ORIG]** recurso original leído de la ISO del usuario
 - [x] `ca_assetcheck`: valida todos los cargadores contra la ISO.
 
 ## Pendiente (siguiente)
-- [ ] [RE] Descifrar `RLVDEFBIN` (reglas del generador) y montar niveles reales sin solapes.
+- [ ] [RE] Elección exacta de pieza por celda (bytes 1–2 de celda, TIBKLAY): puertas, rampas, ascensores, objetos.
+- [ ] [RE] Generador aleatorio original (`RLVDEFBIN` + código en BOOT.BIN) para niveles infinitos.
 - [ ] [RE] Escala real (unidades/m) y parámetros de movimiento desde `BOOT.BIN` (Ghidra).
 - [ ] [RE] Colisión original (`CLM`/`COLL`) en lugar de colisión por triángulos visuales.
 - [ ] [RE] Modelos con skinning (`EH*`), animaciones `MOT1`, enemigos e IA (`WPT`).
@@ -43,7 +46,7 @@ Leyenda de procedencia: **[ORIG]** recurso original leído de la ISO del usuario
 - [ ] [RE] Interfaz original (C2B/CAS2), fuentes y textos (F2B), variante PSPI `bpp=65540`.
 - [ ] [NUEVO] Armas, daño, munición, HUD original, progresión de sectores.
 - [ ] [NUEVO] Reproducción de vídeos PMF (requiere decodificador H.264 + ATRAC3plus).
-- [ ] Compilación Windows (.exe) + prueba con Wine + paquete de distribución.
+- [x] Compilación Windows (.exe) + prueba con Wine + paquete de distribución (`scripts/build_windows.sh`).
 
 ## Bloqueado / riesgos
 - Ninguno bloqueante. `EBOOT.BIN` cifrado **no es necesario** porque `BOOT.BIN` está en claro.
