@@ -915,8 +915,10 @@ static void registerCoreHle() {
 
     extern void registerIoHle();
     extern void registerDeviceHle();
+    extern void registerSasHle();
     registerIoHle();
     registerDeviceHle();
+    registerSasHle();
 }
 
 } // namespace psp::kernel

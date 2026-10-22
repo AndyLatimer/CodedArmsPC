@@ -9,3 +9,4 @@ third_party/SDL2-*/
 docs/images/
 __pycache__/
 *.pyc
+/.claude/

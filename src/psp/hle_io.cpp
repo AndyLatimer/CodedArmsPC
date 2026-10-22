@@ -380,6 +380,25 @@ void registerIoHle() {
         case 0x02025806: // inserted? 1 = yes
             if (out && outLen >= 4) write32(out, 1);
             break;
+        case 0x02425818: { // capacity: arg holds a pointer to {maxClusters, freeClusters, maxSectors, sectorSize, sectorCount}
+            // PPSSPP reports FAKE_FREE_SPACE (1.5 GB) free, 32 KB clusters of 0x200-byte sectors.
+            if (!arg || A(c, 3) < 4) { ret(c, 0x80220081); return; } // SCE_ERROR_MEMSTICK_DEVCTL_BAD_PARAMS
+            uint32_t p = read32(arg);
+            const uint64_t freeSize = (1024ull + 512) * 1024 * 1024;
+            const uint32_t sectorSize = 0x200, sectorCount = 32 * 1024 / sectorSize;
+            uint32_t clusters = (uint32_t)((freeSize * 95 / 100) / (sectorSize * sectorCount));
+            if (validAddress(p) && validAddress(p + 19)) {
+                write32(p, clusters);
+                write32(p + 4, clusters);
+                write32(p + 8, clusters);
+                write32(p + 12, sectorSize);
+                write32(p + 16, sectorCount);
+            }
+            break;
+        }
+        case 0x02425824: // write protected? 0 = no
+            if (out && outLen == 4) write32(out, 0);
+            break;
         default:
             log("sceIoDevctl(%s, %08x) unhandled", dev.c_str(), cmd);
             if (out && outLen >= 4) write32(out, 0);

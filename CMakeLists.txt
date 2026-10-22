@@ -76,6 +76,9 @@ add_library(ca_psp OBJECT
   src/psp/kernel.cpp
   src/psp/hle_io.cpp
   src/psp/hle_devices.cpp
+  src/psp/hle_sas.cpp
+  src/psp/ppsspp/SasAudio.cpp
+  src/psp/ppsspp/SasReverb.cpp
   src/psp/hle_nids.cpp
   src/psp/ge.cpp
   src/psp/ppsspp/InterpreterVFPU.cpp
