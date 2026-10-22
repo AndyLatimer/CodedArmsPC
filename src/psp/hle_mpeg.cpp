@@ -1174,7 +1174,7 @@ u32 sceMpegFlushAllStream(u32 mpeg) {
 		ringbuffer->packetsWritePos = 0;
 	}
 
-	INFO_LOG(Log::Mpeg, "sceMpegFlushAllStream(%08x)", mpeg);
+	INFO_LOG(Log::Mpeg, "sceMpegFlushAllStream(%08x): %d video frames decoded", mpeg, ctx->videoFrameCount);
 	return 0;
 }
 
