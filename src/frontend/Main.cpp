@@ -62,6 +62,11 @@ struct FrontSettings {
     bool invertY = false;
     std::string lookUp = "triangle", lookDown = "cross", lookLeft = "square", lookRight = "circle";
     bool mouseLook = true;
+    int mouseLookMode = 1;   // 0 off, 1 direct aim, 2 look buttons
+    float deadzoneRight = 0.15f, padCurve = 1.6f, padTurnRate = 3.0f; // rad/s at full deflection
+    float padSensX = 1.0f, padSensY = 0.8f;
+    bool padInvertX = false, padInvertY = false;
+    bool invertX = false;
     std::vector<ca::Binding> bindings[IN_COUNT];
     std::string bindingText[IN_COUNT];
 };
@@ -97,7 +102,16 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.stretch = getF(ini, "video", "stretch", 0) != 0;
     s.volume = getF(ini, "audio", "volume", 1.0f);
     s.deadzone = getF(ini, "input", "deadzone", 0.2f);
-    s.mouseLook = getF(ini, "input", "mouse_look", 1) != 0;
+    s.mouseLookMode = (int)getF(ini, "input", "mouse_look", 1);
+    s.mouseLook = s.mouseLookMode != 0;
+    s.invertX = getF(ini, "input", "invert_x", 0) != 0;
+    s.deadzoneRight = getF(ini, "input", "deadzone_right", 0.15f);
+    s.padCurve = getF(ini, "input", "pad_look_curve", 1.6f);
+    s.padTurnRate = getF(ini, "input", "pad_turn_rate", 3.0f);
+    s.padSensX = getF(ini, "input", "pad_sens_x", 1.0f);
+    s.padSensY = getF(ini, "input", "pad_sens_y", 0.8f);
+    s.padInvertX = getF(ini, "input", "pad_invert_x", 0) != 0;
+    s.padInvertY = getF(ini, "input", "pad_invert_y", 0) != 0;
     s.mouseSensX = getF(ini, "input", "mouse_sens_x", 1.0f);
     s.mouseSensY = getF(ini, "input", "mouse_sens_y", 1.0f);
     s.invertY = getF(ini, "input", "invert_y", 0) != 0;
@@ -119,7 +133,15 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
     ini.set("video", "stretch", s.stretch ? "1" : "0");
     ini.set("audio", "volume", std::to_string(s.volume));
     ini.set("input", "deadzone", std::to_string(s.deadzone));
-    ini.set("input", "mouse_look", s.mouseLook ? "1" : "0");
+    ini.set("input", "mouse_look", std::to_string(s.mouseLookMode));
+    ini.set("input", "invert_x", s.invertX ? "1" : "0");
+    ini.set("input", "deadzone_right", std::to_string(s.deadzoneRight));
+    ini.set("input", "pad_look_curve", std::to_string(s.padCurve));
+    ini.set("input", "pad_turn_rate", std::to_string(s.padTurnRate));
+    ini.set("input", "pad_sens_x", std::to_string(s.padSensX));
+    ini.set("input", "pad_sens_y", std::to_string(s.padSensY));
+    ini.set("input", "pad_invert_x", s.padInvertX ? "1" : "0");
+    ini.set("input", "pad_invert_y", s.padInvertY ? "1" : "0");
     ini.set("input", "mouse_sens_x", std::to_string(s.mouseSensX));
     ini.set("input", "mouse_sens_y", std::to_string(s.mouseSensY));
     ini.set("input", "invert_y", s.invertY ? "1" : "0");
@@ -153,7 +175,10 @@ int inputIndex(const std::string& name) {
     return -1;
 }
 
-void updateController(const FrontSettings& s, InputState& in, bool focused) {
+// Mouse counts to radians at sensitivity 1 (about 0.13 degrees per count).
+constexpr float kRadiansPerCount = 0.0022f;
+
+void updateController(const FrontSettings& s, InputState& in, bool focused, float dt) {
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     Uint32 mouse = focused ? SDL_GetMouseState(nullptr, nullptr) : 0;
     uint32_t buttons = 0;
@@ -171,14 +196,19 @@ void updateController(const FrontSettings& s, InputState& in, bool focused) {
         ca::Vec2 v = ca::applyRadialDeadzone(ax, ay, s.deadzone);
         ax = v.x;
         ay = v.y;
-        // Right stick drives the look buttons.
+        // Right stick: direct aim at a turn rate (rad/s) with a radial dead zone and a response
+        // curve, scaled by the frame time.
         float rx = SDL_GameControllerGetAxis(in.pad, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f;
         float ry = SDL_GameControllerGetAxis(in.pad, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f;
-        auto press = [&](const std::string& n) { int k = inputIndex(n); if (k >= 0) buttons |= kInputButtons[k]; };
-        if (rx < -0.5f) press(s.lookLeft);
-        if (rx > 0.5f) press(s.lookRight);
-        if (ry < -0.5f) press(s.invertY ? s.lookDown : s.lookUp);
-        if (ry > 0.5f) press(s.invertY ? s.lookUp : s.lookDown);
+        ca::Vec2 r = ca::applyRadialDeadzone(rx, ry, s.deadzoneRight);
+        float mag = std::sqrt(r.x * r.x + r.y * r.y);
+        if (mag > 0) {
+            float k = std::pow(mag, s.padCurve) / mag;
+            std::lock_guard<std::mutex> lk(psp::host::g_aim.m);
+            psp::host::g_aim.enabled = true;
+            psp::host::g_aim.yaw += r.x * k * s.padTurnRate * s.padSensX * dt * (s.padInvertX ? -1.0f : 1.0f);
+            psp::host::g_aim.pitch += r.y * k * s.padTurnRate * s.padSensY * dt * (s.padInvertY ? -1.0f : 1.0f);
+        }
     }
     if (held[IN_STICK_LEFT]) ax = -1;
     if (held[IN_STICK_RIGHT]) ax = 1;
@@ -189,8 +219,15 @@ void updateController(const FrontSettings& s, InputState& in, bool focused) {
         ay *= 0.7071f;
     }
 
-    // Mouse look: accumulated motion is spent as presses of the look buttons.
-    if (s.mouseLook && focused && SDL_GetRelativeMouseMode()) {
+    // Mouse: direct aim (default) adds the motion to the game's view angles (game_hooks.cpp);
+    // mouse_look = 2 instead spends it as presses of the look buttons like the original pad.
+    if (s.mouseLookMode == 1 && focused && SDL_GetRelativeMouseMode()) {
+        std::lock_guard<std::mutex> lk(psp::host::g_aim.m);
+        psp::host::g_aim.enabled = true;
+        psp::host::g_aim.yaw += in.lookAccumX * kRadiansPerCount;
+        psp::host::g_aim.pitch += in.lookAccumY * kRadiansPerCount;
+        in.lookAccumX = in.lookAccumY = 0;
+    } else if (s.mouseLookMode == 2 && focused && SDL_GetRelativeMouseMode()) {
         auto press = [&](const std::string& n) { int k = inputIndex(n); if (k >= 0) buttons |= kInputButtons[k]; };
         const float step = 6.0f;
         if (in.lookAccumX <= -step) { press(s.lookLeft); in.lookAccumX += step; }
@@ -353,6 +390,7 @@ int main(int argc, char** argv) {
     game.detach();
 
     SDL_SetRelativeMouseMode(s.mouseLook ? SDL_TRUE : SDL_FALSE);
+    Uint64 lastTicks = SDL_GetPerformanceCounter();
     psp::gpu::PresentInfo frame;
     bool haveFrame = false, running = true, focused = true;
     while (running) {
@@ -371,7 +409,7 @@ int main(int argc, char** argv) {
                 break;
             case SDL_MOUSEMOTION:
                 if (SDL_GetRelativeMouseMode()) {
-                    in.lookAccumX += e.motion.xrel * s.mouseSensX;
+                    in.lookAccumX += e.motion.xrel * s.mouseSensX * (s.invertX ? -1.0f : 1.0f);
                     in.lookAccumY += e.motion.yrel * s.mouseSensY * (s.invertY ? -1.0f : 1.0f);
                 }
                 break;
@@ -394,7 +432,10 @@ int main(int argc, char** argv) {
                 break;
             }
         }
-        updateController(s, in, focused);
+        Uint64 nowTicks = SDL_GetPerformanceCounter();
+        float dt = std::min(0.1f, (float)(nowTicks - lastTicks) / (float)SDL_GetPerformanceFrequency());
+        lastTicks = nowTicks;
+        updateController(s, in, focused, dt);
 
         psp::gpu::PresentInfo p;
         if (psp::gpu::renderPump(p, 4)) { frame = p; haveFrame = true; }

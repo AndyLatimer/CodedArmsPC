@@ -1,0 +1,4 @@
+# Port hooks for Coded Arms (ULES-00124): guest address of a (non-branch) instruction, then the
+# host function (src/psp/game_hooks.cpp) called right after it executes. Found with the store
+# watchpoint build (-DCA_RECOMP_WATCH); see TECHNICAL_NOTES.md section 13.
+0889bad4  ca_hook_player_view   # entry of the per-frame view update: s3 = view object, s2 = input

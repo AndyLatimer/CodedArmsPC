@@ -39,4 +39,13 @@ extern AudioChannel g_audio[kAudioChannels];
 extern std::mutex g_audioMutex;
 size_t audioQueuedFrames(int ch);
 
+// Direct aim: radians added to the player's yaw/pitch by the game hooks (game_hooks.cpp) the
+// next time the game updates the camera. The front end accumulates mouse motion here.
+struct Aim {
+    std::mutex m;
+    float yaw = 0, pitch = 0;
+    bool enabled = false;
+};
+extern Aim g_aim;
+
 } // namespace psp::host

@@ -244,6 +244,19 @@ void controlThread(std::string path) {
                 g_ctlShots.push_back(arg);
             } else if (c == "gpudump") {
                 psp::gpu::dumpNextFrames(n >= 2 && std::atoi(arg) > 0 ? std::atoi(arg) : 1);
+            } else if (c == "aim") {
+                float y = 0, p = 0;
+                std::sscanf(l.c_str(), "%*s %f %f", &y, &p);
+                std::lock_guard<std::mutex> lk(psp::host::g_aim.m);
+                psp::host::g_aim.enabled = true;
+                psp::host::g_aim.yaw += y;
+                psp::host::g_aim.pitch += p;
+            } else if (c == "memdump") {
+                // User RAM 0x08800000..0x0A000000 to a file
+                if (FILE* o = std::fopen(arg, "wb")) {
+                    std::fwrite(psp::hostPtr(0x08800000), 1, 0x01800000, o);
+                    std::fclose(o);
+                }
             } else if (c == "maxdraw") {
                 psp::gpu::setMaxDraws(std::atoi(arg));
             } else if (c == "quit") {

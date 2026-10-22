@@ -234,3 +234,13 @@ void rt_trace_exit(Ctx* c, uint32_t fn) {
 void hle_syscall(Ctx* c, uint32_t code) { psp::kernel::fatal(c, "raw syscall %x in game code", code); }
 
 } // extern "C"
+
+// Debug builds generated with --watch call this before every store.
+extern "C" void rt_watch_store(Ctx* c, uint32_t pc, uint32_t addr) {
+    static const uint32_t watch = [] {
+        const char* w = std::getenv("CA_WATCH_ADDR");
+        return w ? (uint32_t)std::strtoul(w, nullptr, 16) : 0u;
+    }();
+    if (watch && ((addr ^ watch) & 0x0FFFFFFC) == 0)
+        std::fprintf(stderr, "[WATCH] %08x stores to %08x (ra=%08x)\n", pc, addr, c->r[31]);
+}

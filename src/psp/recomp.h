@@ -51,6 +51,9 @@ static inline void wr16_(uint8_t* p, uint16_t v) { memcpy(p, &v, 2); }
 #define WR16(a, v) wr16_(HOST(a), (uint16_t)(v))
 #define WR32(a, v) wr32_(HOST(a), (uint32_t)(v))
 
+void rt_watch_store(Ctx* c, uint32_t pc, uint32_t addr);
+void ca_hook_player_view(Ctx* c);
+
 #define R(n) (c->r[n])
 #define F(n) (c->f[n])
 #define FI(n) (c->fi[n])
