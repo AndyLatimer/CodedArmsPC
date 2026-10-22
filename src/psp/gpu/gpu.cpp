@@ -1,4 +1,5 @@
 #include "psp/gpu/gpu.h"
+#include "psp/gpu/button_glyphs.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +27,30 @@ extern "C" int stbi_write_png(char const* filename, int w, int h, int comp, cons
 namespace psp::gpu {
 
 namespace {
+
+// CA_PERF=1: per-second timing of the renderer stages (microseconds) on stderr.
+struct PerfCounters {
+    std::atomic<uint64_t> flips{0}, waitUs{0}, patchUs{0}, drawUs{0}, texUs{0}, execUs{0}, presents{0}, patches{0}, draws{0}, verts{0};
+} g_perf;
+const bool g_perfOn = std::getenv("CA_PERF") != nullptr;
+struct ScopedUs {
+    std::atomic<uint64_t>& acc;
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    explicit ScopedUs(std::atomic<uint64_t>& a) : acc(a) {}
+    ~ScopedUs() { acc += (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - t0).count(); }
+};
+void perfReport() {
+    static auto last = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (now - last < std::chrono::seconds(1)) return;
+    last = now;
+    std::fprintf(stderr, "[PERF] flips=%llu queue-wait=%llums ", (unsigned long long)g_perf.flips.exchange(0), (unsigned long long)g_perf.waitUs.exchange(0) / 1000);
+    std::fprintf(stderr, "presents=%llu draws=%llu patches=%llu verts=%llu | draw=%llums patch=%llums tex=%llums exec=%llums\n",
+                 (unsigned long long)g_perf.presents.exchange(0), (unsigned long long)g_perf.draws.exchange(0),
+                 (unsigned long long)g_perf.patches.exchange(0), (unsigned long long)g_perf.verts.exchange(0),
+                 (unsigned long long)g_perf.drawUs.exchange(0) / 1000, (unsigned long long)g_perf.patchUs.exchange(0) / 1000,
+                 (unsigned long long)g_perf.texUs.exchange(0) / 1000, (unsigned long long)g_perf.execUs.exchange(0) / 1000);
+}
 
 // ---- data shared by recorder and executor ------------------------------------------------
 
@@ -155,6 +180,8 @@ uint32_t stencilOpGL(int o) {
     return t[o & 7];
 }
 
+struct TessResult { std::vector<Vertex> verts; int prim = 0; };
+
 class Recorder : public ge::Renderer {
 public:
     Recorder() { frame_ = std::make_unique<Frame>(); }
@@ -163,6 +190,7 @@ public:
 
     void setDisplay(uint32_t top, uint32_t stride, uint32_t fmt) {
         std::lock_guard<std::recursive_mutex> lk(mutex_);
+        ++g_perf.flips;
         displayAddr_ = top;
         displayStride_ = stride;
         displayFormat_ = fmt;
@@ -329,6 +357,7 @@ private:
         }
         frame_->number = ++frameNumber_;
         {
+            ScopedUs waitPerf(g_perf.waitUs);
             std::unique_lock<std::mutex> lk(g_queueMutex);
             // Back-pressure: the guest waits for the renderer like for a real GPU.
             g_queueCv.wait_for(lk, std::chrono::milliseconds(200), [] { return g_queue.size() < 3; });
@@ -374,6 +403,9 @@ private:
     bool setupTexture(GlState& st, Ubo& u, const FboInfo& target);
     void draw(uint32_t data);
     void drawPatch(uint32_t data, bool spline);
+    // Tessellated patches by (control points, parameters): the level geometry is static, so
+    // nearly every patch is the same every frame.
+    std::unordered_map<uint64_t, std::shared_ptr<const TessResult>> patchCache_;
     void emit(std::vector<Vertex>& vin, int prim, bool through, bool hasColor);
     void transfer(uint32_t data);
     void buildUbo(Ubo& u, const FboInfo& f, bool through, bool hasColor);
@@ -650,6 +682,7 @@ void Recorder::buildState(GlState& st, const FboInfo& f, bool through, int prim)
 }
 
 bool Recorder::setupTexture(GlState& st, Ubo& u, const FboInfo& target) {
+    ScopedUs perf(g_perf.texUs);
     const uint32_t texbufw0 = reg(CMD_TEXBUFWIDTH0);
     const uint32_t addr = (reg(CMD_TEXADDR0) & 0xFFFFF0) | ((texbufw0 << 8) & 0x0F000000);
     const int format = reg(CMD_TEXFORMAT) & 0xF;
@@ -736,6 +769,7 @@ bool Recorder::setupTexture(GlState& st, Ubo& u, const FboInfo& target) {
             uint32_t la = (reg(CMD_TEXADDR0 + l) & 0xFFFFF0) | ((bw << 8) & 0x0F000000);
             int lw = 1 << (reg(CMD_TEXSIZE0 + l) & 0xF), lh = 1 << ((reg(CMD_TEXSIZE0 + l) >> 8) & 0xF);
             decodeTexture(la, format, lw, lh, textureBufw(bw, format), swz, cs, px);
+            if (l == 0) patchButtonGlyphs(px.data(), lw, lh);
             size_t off = frame_->blob.size();
             frame_->blob.resize(off + px.size() * 4);
             std::memcpy(frame_->blob.data() + off, px.data(), px.size() * 4);
@@ -865,32 +899,12 @@ std::vector<AxisSample> axisSamples(bool spline, int points, int tess, int type)
 }
 } // namespace
 
-void Recorder::drawPatch(uint32_t data, bool spline) {
-    VertexFormat fmt;
-    fmt.set(reg(CMD_VERTEXTYPE));
-    const int nu = data & 0xFF, nv = (data >> 8) & 0xFF;
-    const int count = nu * nv;
-    const int isz = fmt.indexSize();
-    std::vector<uint32_t> indices((size_t)count);
-    for (int i = 0; i < count; ++i) {
-        uint32_t a = iaddr_ + (uint32_t)(i * isz);
-        indices[i] = isz == 0 ? (uint32_t)i : (isz == 1 ? read8(a) : (isz == 2 ? read16(a) : read32(a)));
-    }
-    const uint32_t vbase = vaddr_;
-    if (isz) iaddr_ += (uint32_t)(count * isz);
-    else vaddr_ += (uint32_t)(count * fmt.size);
-    // The hardware draws nothing with fewer than 4 points along either direction.
-    if (nu < 4 || nv < 4) return;
-
-    dctx_.mtx = &mtx_;
-    std::vector<Vertex> cp((size_t)count);
-    for (int i = 0; i < count; ++i) decodeVertex(fmt, dctx_, vbase, indices[i], cp[i]);
-
-    const uint32_t div = reg(CMD_PATCHDIVISION);
+std::shared_ptr<const TessResult> tessellate(const std::vector<Vertex>& cp, int nu, int nv, uint32_t data,
+                                                        bool spline, const VertexFormat& fmt, uint32_t div, int primType,
+                                                        bool facing) {
+    auto res = std::make_shared<TessResult>();
     int tessU = std::max(1, (int)(div & 0x7F)), tessV = std::max(1, (int)((div >> 8) & 0x7F));
     const int typeU = (data >> 16) & 3, typeV = (data >> 18) & 3;
-    const int primType = reg(CMD_PATCHPRIMITIVE) & 3; // 0 triangles, 1 lines, 2 points
-    const bool facing = reg(CMD_PATCHFACING) & 1;
     const auto su = axisSamples(spline, nu, tessU, typeU);
     const auto sv = axisSamples(spline, nv, tessV, typeV);
     const int gu = (int)su.size(), gv = (int)sv.size();
@@ -934,32 +948,92 @@ void Recorder::drawPatch(uint32_t data, bool spline) {
         }
     }
 
-    std::vector<Vertex> out;
+    std::vector<Vertex>& out = res->verts;
     if (primType == 2) {
-        out = grid;
-        emit(out, PRIM_POINTS, fmt.through, fmt.col != 0);
-        return;
+        out = std::move(grid);
+        res->prim = PRIM_POINTS;
+        return res;
     }
-    for (int j = 0; j + 1 < gv; ++j) {
-        for (int i = 0; i + 1 < gu; ++i) {
-            const Vertex& v0 = grid[(size_t)j * gu + i];
-            const Vertex& v1 = grid[(size_t)j * gu + i + 1];
-            const Vertex& v2 = grid[(size_t)(j + 1) * gu + i];
-            const Vertex& v3 = grid[(size_t)(j + 1) * gu + i + 1];
-            if (primType == 1) {
+    if (primType == 1) {
+        for (int j = 0; j + 1 < gv; ++j) {
+            for (int i = 0; i + 1 < gu; ++i) {
+                const Vertex& v0 = grid[(size_t)j * gu + i];
+                const Vertex& v1 = grid[(size_t)j * gu + i + 1];
+                const Vertex& v2 = grid[(size_t)(j + 1) * gu + i];
+                const Vertex& v3 = grid[(size_t)(j + 1) * gu + i + 1];
                 out.push_back(v0); out.push_back(v2);
                 out.push_back(v2); out.push_back(v1);
                 if (i + 2 == gu) { out.push_back(v1); out.push_back(v3); }
-            } else {
-                out.push_back(v0); out.push_back(v2); out.push_back(v1);
-                out.push_back(v1); out.push_back(v2); out.push_back(v3);
             }
         }
+        res->prim = PRIM_LINES;
+        return res;
     }
-    if (!out.empty()) emit(out, primType == 1 ? PRIM_LINES : PRIM_TRIANGLES, fmt.through, fmt.col != 0);
+    // One triangle strip: per row (top_0, bottom_0, top_1, bottom_1, ...), which gives the
+    // triangles (t_i, b_i, t_i+1) and (t_i+1, b_i, b_i+1) with the winding of the hardware's
+    // order; rows are joined by two degenerate vertices (an even count keeps the winding).
+    if (gu < 2 || gv < 2) return res;
+    out.reserve((size_t)(gv - 1) * (2 * gu + 2));
+    for (int j = 0; j + 1 < gv; ++j) {
+        if (j > 0) out.push_back(grid[(size_t)j * gu]);
+        for (int i = 0; i < gu; ++i) {
+            out.push_back(grid[(size_t)j * gu + i]);
+            out.push_back(grid[(size_t)(j + 1) * gu + i]);
+        }
+        if (j + 2 < gv) out.push_back(out.back());
+    }
+    res->prim = PRIM_TRIANGLE_STRIP;
+    return res;
+}
+
+
+void Recorder::drawPatch(uint32_t data, bool spline) {
+    ScopedUs perf(g_perf.patchUs);
+    ++g_perf.patches;
+    VertexFormat fmt;
+    fmt.set(reg(CMD_VERTEXTYPE));
+    const int nu = data & 0xFF, nv = (data >> 8) & 0xFF;
+    const int count = nu * nv;
+    const int isz = fmt.indexSize();
+    std::vector<uint32_t> indices((size_t)count);
+    for (int i = 0; i < count; ++i) {
+        uint32_t a = iaddr_ + (uint32_t)(i * isz);
+        indices[i] = isz == 0 ? (uint32_t)i : (isz == 1 ? read8(a) : (isz == 2 ? read16(a) : read32(a)));
+    }
+    const uint32_t vbase = vaddr_;
+    if (isz) iaddr_ += (uint32_t)(count * isz);
+    else vaddr_ += (uint32_t)(count * fmt.size);
+    // The hardware draws nothing with fewer than 4 points along either direction.
+    if (nu < 4 || nv < 4) return;
+
+    dctx_.mtx = &mtx_;
+    std::vector<Vertex> cp((size_t)count);
+    for (int i = 0; i < count; ++i) decodeVertex(fmt, dctx_, vbase, indices[i], cp[i]);
+
+    const uint32_t div = reg(CMD_PATCHDIVISION);
+    const uint32_t prim = reg(CMD_PATCHPRIMITIVE) & 3; // 0 triangles, 1 lines, 2 points
+    const bool facing = reg(CMD_PATCHFACING) & 1;
+    const uint64_t params[2] = {(uint64_t)data | (uint64_t)spline << 31 | (uint64_t)prim << 32 | (uint64_t)facing << 34 |
+                                    (uint64_t)(fmt.col != 0) << 35 | (uint64_t)(fmt.tc != 0) << 36,
+                                div};
+    const uint64_t key = hashBytes(reinterpret_cast<const uint8_t*>(cp.data()), cp.size() * sizeof(Vertex)) ^
+                         (hashBytes(reinterpret_cast<const uint8_t*>(params), sizeof params) * 0x9E3779B97F4A7C15ull);
+    std::shared_ptr<const TessResult> tess;
+    if (auto it = patchCache_.find(key); it != patchCache_.end()) {
+        tess = it->second;
+    } else {
+        tess = tessellate(cp, nu, nv, data, spline, fmt, div, (int)prim, facing);
+        if (patchCache_.size() >= 16384) patchCache_.clear();
+        patchCache_[key] = tess;
+    }
+    if (tess->verts.empty()) return;
+    std::vector<Vertex> out = tess->verts;
+    emit(out, tess->prim, fmt.through, fmt.col != 0);
 }
 
 void Recorder::draw(uint32_t data) {
+    ScopedUs perf(g_perf.drawUs);
+    ++g_perf.draws;
     const int count = data & 0xFFFF;
     const int prim = (data >> 16) & 7;
     VertexFormat fmt;
@@ -1303,6 +1377,9 @@ void debugFrame(const Frame& fr) {
 }
 
 void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented) {
+    ScopedUs perf(g_perf.execUs);
+    g_perf.verts += fr.verts.size() / kFloatsPerVertex;
+    if (g_perfOn) perfReport();
     debugFrame(fr);
     glBindVertexArray(g_exec.vao);
     glBindBuffer(GL_ARRAY_BUFFER, g_exec.vbo);
@@ -1401,6 +1478,7 @@ void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented) {
             break;
         }
         case OP_PRESENT: {
+            ++g_perf.presents;
             auto it = g_exec.fbos.find(op.id);
             if (it == g_exec.fbos.end()) break;
             pinfo.texture = it->second.color;
