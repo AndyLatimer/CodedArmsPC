@@ -1,5 +1,6 @@
 // Device HLE: display, controller, GE front end, audio, utility dialogs, UMD, power,
-// impose, RTC. Network (ad hoc multiplayer) and MPEG video are reported unavailable for now.
+// impose, RTC. Network (ad hoc multiplayer) is reported unavailable for now; MPEG video is in
+// hle_mpeg.cpp.
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -272,12 +273,6 @@ void registerDeviceHle() {
     for (const char* n : {"sceNetAdhocctlConnect", "sceNetAdhocctlScan", "sceNetAdhocPdpCreate", "sceNetAdhocPtpOpen",
                           "sceNetAdhocPtpListen", "sceNetAdhocPtpConnect"})
         registerHle(n, [](Ctx* c) { ret(c, 0x80410B80); }); // generic ad hoc error
-
-    // ---- MPEG video: not implemented yet; fail early so the game skips its movies
-    registerHle("sceMpegInit", [](Ctx* c) { ret(c, 0x80618005); });
-    registerHle("sceMpegQueryMemSize", [](Ctx* c) { ret(c, 0x10000); });
-    registerHle("sceMpegRingbufferQueryMemSize", [](Ctx* c) { ret(c, A(c, 0) * 2048); });
-    registerHle("sceMpegCreate", [](Ctx* c) { ret(c, 0x80618005); });
 }
 
 } // namespace psp::kernel
