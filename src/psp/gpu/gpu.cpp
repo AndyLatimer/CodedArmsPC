@@ -359,6 +359,8 @@ private:
 
     bool setupTexture(GlState& st, Ubo& u, const FboInfo& target);
     void draw(uint32_t data);
+    void drawPatch(uint32_t data, bool spline);
+    void emit(std::vector<Vertex>& vin, int prim, bool through, bool hasColor);
     void transfer(uint32_t data);
     void buildUbo(Ubo& u, const FboInfo& f, bool through, bool hasColor);
     void buildState(GlState& st, const FboInfo& f, bool through, int prim);
@@ -383,12 +385,8 @@ void Recorder::command(uint32_t, uint32_t cmd, uint32_t data, uint32_t, uint32_t
     case CMD_LOADCLUT: loadClut(); break;
     case CMD_TEXFLUSH: ++texEpoch_; break;
     case CMD_TRANSFERSTART: transfer(data); break;
-    case CMD_BEZIER:
-    case CMD_SPLINE: {
-        static bool once = false;
-        if (!once) { once = true; kernel::log("[GPU] bezier/spline patches are not implemented"); }
-        break;
-    }
+    case CMD_BEZIER: drawPatch(data, false); break;
+    case CMD_SPLINE: drawPatch(data, true); break;
     default:
         if (cmd >= CMD_MORPHWEIGHT0 && cmd < CMD_MORPHWEIGHT0 + 8) dctx_.morphWeights[cmd - CMD_MORPHWEIGHT0] = float24(data);
         break;
@@ -617,7 +615,8 @@ void Recorder::buildState(GlState& st, const FboInfo& f, bool through, int prim)
     // Culling (never for through mode or rectangles)
     if (!through && prim != PRIM_RECTANGLES && (reg(CMD_CULLFACEENABLE) & 1)) {
         st.cull = true;
-        st.cullFace = (reg(CMD_CULL) & 1) ? GL_BACK : GL_FRONT;
+        static const bool flip = std::getenv("CA_CULL_FLIP") != nullptr;
+        st.cullFace = ((reg(CMD_CULL) & 1) != 0) != flip ? GL_BACK : GL_FRONT;
     }
     if (reg(CMD_LOGICOPENABLE) & 1) {
         st.logic = true;
@@ -748,6 +747,192 @@ void transformToScreen(const Matrices& m, const Ubo& u, const Vertex& v, float o
     out[2] = c[2] * iw * u.vpScale[2] + u.vpCenter[2];
 }
 
+// ---- Bezier / spline patches (tessellated on the CPU like PPSSPP's SoftwareTessellation) ----
+
+namespace {
+struct Basis { float b[4], d[4]; };
+
+void bezierWeights(float t, Basis& w) {
+    w.b[0] = (1 - t) * (1 - t) * (1 - t);
+    w.b[1] = 3 * t * (1 - t) * (1 - t);
+    w.b[2] = 3 * t * t * (1 - t);
+    w.b[3] = t * t * t;
+    w.d[0] = -3 * (1 - t) * (1 - t);
+    w.d[1] = 9 * t * t - 12 * t + 3;
+    w.d[2] = 3 * (2 - 3 * t) * t;
+    w.d[3] = 3 * t * t;
+}
+
+// from PPSSPP GPU/Common/SplineCommon.cpp (Spline3DWeight): cubic B-spline with open/closed ends.
+struct KnotDiv { float _3_0 = 1.0f / 3, _4_1 = 1.0f / 3, _5_2 = 1.0f / 3, _3_1 = 0.5f, _4_2 = 0.5f, _3_2 = 1.0f; };
+
+void splineKnots(int n, int type, std::vector<float>& knots, std::vector<KnotDiv>& divs) {
+    knots.assign((size_t)n + 2, 0.0f);
+    divs.assign((size_t)n, KnotDiv{});
+    for (int i = 0; i < n + 2; ++i) knots[i] = (float)i - 2;
+    if (type & 1) {
+        knots[0] = 0;
+        knots[1] = 0;
+        divs[0]._3_0 = 1.0f;
+        divs[0]._4_1 = 0.5f;
+        divs[0]._3_1 = 1.0f;
+        if (n > 1) divs[1]._3_0 = 0.5f;
+    }
+    if (type & 2) {
+        divs[n - 1]._4_1 = (n == 1 && (type & 1)) ? 1.0f : 0.5f;
+        divs[n - 1]._5_2 = 1.0f;
+        divs[n - 1]._4_2 = 1.0f;
+        if (n > 1) divs[n - 2]._5_2 = 0.5f;
+    }
+}
+
+void splineWeights(float t, const float* knots, const KnotDiv& div, Basis& w) {
+    float t0 = t - knots[0], t1 = t - knots[1], t2 = t - knots[2];
+    float f30 = t0 * div._3_0, f41 = t1 * div._4_1, f52 = t2 * div._5_2;
+    float f31 = t1 * div._3_1, f42 = t2 * div._4_2, f32 = t2 * div._3_2;
+    float a = (1 - f30) * (1 - f31), b = f31 * f41, c = (1 - f41) * (1 - f42), d = f42 * f52;
+    w.b[0] = a * (1 - f32);
+    w.b[1] = 1 - a - b + ((a + b + c - 1) * f32);
+    w.b[2] = b + ((1 - b - c - d) * f32);
+    w.b[3] = d * f32;
+    float i1 = (1 - f31) * (1 - f32), i2 = f31 * (1 - f32) + (1 - f42) * f32, i3 = f42 * f32;
+    float f130 = i1 * div._3_0, f241 = i2 * div._4_1, f352 = i3 * div._5_2;
+    w.d[0] = 3 * (0 - f130);
+    w.d[1] = 3 * (f130 - f241);
+    w.d[2] = 3 * (f241 - f352);
+    w.d[3] = 3 * (f352 - 0);
+}
+
+// Per-axis weights for every tessellated sample: (patch, first control point, basis).
+struct AxisSample { int patch, point; Basis w; float t; };
+
+std::vector<AxisSample> axisSamples(bool spline, int points, int tess, int type) {
+    std::vector<AxisSample> out;
+    if (!spline) {
+        const int patches = (points - 1) / 3;
+        for (int p = 0; p < patches; ++p)
+            for (int i = 0; i <= tess; ++i) {
+                AxisSample s;
+                s.patch = p;
+                s.point = 3 * p;
+                s.t = p + (float)i / tess;
+                bezierWeights((float)i / tess, s.w);
+                out.push_back(s);
+            }
+        return out;
+    }
+    const int patches = points - 3;
+    std::vector<float> knots;
+    std::vector<KnotDiv> divs;
+    splineKnots(patches, type, knots, divs);
+    for (int p = 0; p < patches; ++p)
+        for (int j = (p == 0 ? 0 : 1); j <= tess; ++j) {
+            AxisSample s;
+            s.patch = p;
+            s.point = p;
+            const int index = p * tess + j;
+            s.t = (float)index / tess;
+            splineWeights((float)index / tess, knots.data() + p, divs[p], s.w);
+            out.push_back(s);
+        }
+    return out;
+}
+} // namespace
+
+void Recorder::drawPatch(uint32_t data, bool spline) {
+    VertexFormat fmt;
+    fmt.set(reg(CMD_VERTEXTYPE));
+    const int nu = data & 0xFF, nv = (data >> 8) & 0xFF;
+    const int count = nu * nv;
+    const int isz = fmt.indexSize();
+    std::vector<uint32_t> indices((size_t)count);
+    for (int i = 0; i < count; ++i) {
+        uint32_t a = iaddr_ + (uint32_t)(i * isz);
+        indices[i] = isz == 0 ? (uint32_t)i : (isz == 1 ? read8(a) : (isz == 2 ? read16(a) : read32(a)));
+    }
+    const uint32_t vbase = vaddr_;
+    if (isz) iaddr_ += (uint32_t)(count * isz);
+    else vaddr_ += (uint32_t)(count * fmt.size);
+    // The hardware draws nothing with fewer than 4 points along either direction.
+    if (nu < 4 || nv < 4) return;
+
+    dctx_.mtx = &mtx_;
+    std::vector<Vertex> cp((size_t)count);
+    for (int i = 0; i < count; ++i) decodeVertex(fmt, dctx_, vbase, indices[i], cp[i]);
+
+    const uint32_t div = reg(CMD_PATCHDIVISION);
+    int tessU = std::max(1, (int)(div & 0x7F)), tessV = std::max(1, (int)((div >> 8) & 0x7F));
+    const int typeU = (data >> 16) & 3, typeV = (data >> 18) & 3;
+    const int primType = reg(CMD_PATCHPRIMITIVE) & 3; // 0 triangles, 1 lines, 2 points
+    const bool facing = reg(CMD_PATCHFACING) & 1;
+    const auto su = axisSamples(spline, nu, tessU, typeU);
+    const auto sv = axisSamples(spline, nv, tessV, typeV);
+    const int gu = (int)su.size(), gv = (int)sv.size();
+
+    // Evaluate the grid (row-major, v outer).
+    std::vector<Vertex> grid((size_t)gu * gv);
+    for (int j = 0; j < gv; ++j) {
+        for (int i = 0; i < gu; ++i) {
+            const AxisSample& a = su[i];
+            const AxisSample& b = sv[j];
+            Vertex o;
+            std::memset(&o, 0, sizeof o);
+            float du[3] = {0, 0, 0}, dv[3] = {0, 0, 0};
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    const Vertex& c = cp[(size_t)(b.point + y) * nu + (a.point + x)];
+                    const float w = a.w.b[x] * b.w.b[y];
+                    for (int k = 0; k < 3; ++k) {
+                        o.pos[k] += c.pos[k] * w;
+                        du[k] += c.pos[k] * a.w.d[x] * b.w.b[y];
+                        dv[k] += c.pos[k] * a.w.b[x] * b.w.d[y];
+                    }
+                    for (int k = 0; k < 4; ++k) o.color[k] += c.color[k] * w;
+                    o.uv[0] += c.uv[0] * w;
+                    o.uv[1] += c.uv[1] * w;
+                }
+            }
+            if (!fmt.col) std::memcpy(o.color, cp[0].color, sizeof o.color);
+            if (!fmt.tc) {
+                // Generated texture coordinates: patch index plus the position within it.
+                o.uv[0] = spline ? a.t : a.t;
+                o.uv[1] = spline ? b.t : b.t;
+            }
+            float n[3] = {du[1] * dv[2] - du[2] * dv[1], du[2] * dv[0] - du[0] * dv[2], du[0] * dv[1] - du[1] * dv[0]};
+            float len = std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+            if (len > 0) for (float& c : n) c /= len;
+            else { n[0] = 0; n[1] = 0; n[2] = 1; }
+            if (facing) for (float& c : n) c = -c;
+            std::memcpy(o.nrm, n, sizeof n);
+            grid[(size_t)j * gu + i] = o;
+        }
+    }
+
+    std::vector<Vertex> out;
+    if (primType == 2) {
+        out = grid;
+        emit(out, PRIM_POINTS, fmt.through, fmt.col != 0);
+        return;
+    }
+    for (int j = 0; j + 1 < gv; ++j) {
+        for (int i = 0; i + 1 < gu; ++i) {
+            const Vertex& v0 = grid[(size_t)j * gu + i];
+            const Vertex& v1 = grid[(size_t)j * gu + i + 1];
+            const Vertex& v2 = grid[(size_t)(j + 1) * gu + i];
+            const Vertex& v3 = grid[(size_t)(j + 1) * gu + i + 1];
+            if (primType == 1) {
+                out.push_back(v0); out.push_back(v2);
+                out.push_back(v2); out.push_back(v1);
+                if (i + 2 == gu) { out.push_back(v1); out.push_back(v3); }
+            } else {
+                out.push_back(v0); out.push_back(v2); out.push_back(v1);
+                out.push_back(v1); out.push_back(v2); out.push_back(v3);
+            }
+        }
+    }
+    if (!out.empty()) emit(out, primType == 1 ? PRIM_LINES : PRIM_TRIANGLES, fmt.through, fmt.col != 0);
+}
+
 void Recorder::draw(uint32_t data) {
     const int count = data & 0xFFFF;
     const int prim = (data >> 16) & 7;
@@ -768,17 +953,20 @@ void Recorder::draw(uint32_t data) {
     else vaddr_ += (uint32_t)(count * fmt.size);
     if (count == 0 || prim > PRIM_RECTANGLES) return;
 
-    FboInfo& target = prepareTarget();
     dctx_.mtx = &mtx_;
-    const bool clear = reg(CMD_CLEARMODE) & 1;
-    bool through = fmt.through;
-
     std::vector<Vertex> vin((size_t)count);
     for (int i = 0; i < count; ++i) decodeVertex(fmt, dctx_, vbase, indices[i], vin[i]);
+    emit(vin, prim, fmt.through, fmt.col != 0);
+}
+
+void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasColor) {
+    const int count = (int)vin.size();
+    FboInfo& target = prepareTarget();
+    const bool clear = reg(CMD_CLEARMODE) & 1;
 
     Op op{OP_DRAW};
     Ubo ubo;
-    buildUbo(ubo, target, through, fmt.col != 0);
+    buildUbo(ubo, target, through, hasColor);
     premulBlend_ = false;
     buildState(op.st, target, through, prim);
     if (premulBlend_) {
