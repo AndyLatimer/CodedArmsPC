@@ -95,6 +95,42 @@ target_link_libraries(ca_psp PUBLIC SDL2::SDL2)
 target_compile_options(ca_psp PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-function -Wno-sign-compare -Wno-missing-field-initializers>)
 find_package(Threads REQUIRED)
 
+# ---- sceMpeg (PSMF movies): PPSSPP's MediaEngine with FFmpeg for H.264 video and the
+# standalone ATRAC3+ decoder for audio. FFmpeg is a minimal static build made by
+# tools/build_ffmpeg.sh (third_party/ffmpeg/<platform>).
+if(MINGW)
+  set(CA_FFMPEG_PLATFORM mingw-x86_64)
+elseif(UNIX AND NOT APPLE AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+  set(CA_FFMPEG_PLATFORM linux-x86_64)
+endif()
+set(CA_FFMPEG_DIR "${CMAKE_SOURCE_DIR}/third_party/ffmpeg/${CA_FFMPEG_PLATFORM}" CACHE PATH "Static FFmpeg (include/, lib/) for movie playback")
+if(NOT EXISTS "${CA_FFMPEG_DIR}/lib")
+  message(FATAL_ERROR "No FFmpeg for this platform in ${CA_FFMPEG_DIR}; build one with tools/build_ffmpeg.sh")
+endif()
+add_library(ca_ffmpeg INTERFACE)
+target_include_directories(ca_ffmpeg SYSTEM INTERFACE ${CA_FFMPEG_DIR}/include)
+target_link_libraries(ca_ffmpeg INTERFACE
+  ${CA_FFMPEG_DIR}/lib/libavformat.a ${CA_FFMPEG_DIR}/lib/libavcodec.a
+  ${CA_FFMPEG_DIR}/lib/libswscale.a ${CA_FFMPEG_DIR}/lib/libavutil.a)
+if(WIN32)
+  target_link_libraries(ca_ffmpeg INTERFACE bcrypt advapi32)
+else()
+  target_link_libraries(ca_ffmpeg INTERFACE m)
+endif()
+file(GLOB CA_AT3_SOURCES ${CMAKE_SOURCE_DIR}/src/psp/ppsspp/at3_standalone/*.cpp)
+add_library(ca_at3 STATIC ${CA_AT3_SOURCES})
+target_include_directories(ca_at3 PRIVATE src/psp/ppsspp/at3_standalone/shim)
+if(NOT MSVC)
+  target_compile_options(ca_at3 PRIVATE -w)
+endif()
+target_sources(ca_psp PRIVATE
+  src/psp/hle_mpeg.cpp
+  src/psp/ppsspp/MediaEngine.cpp
+  src/psp/ppsspp/MpegDemux.cpp
+  src/psp/ppsspp/Atrac3Standalone.cpp)
+target_include_directories(ca_psp SYSTEM PRIVATE ${CA_FFMPEG_DIR}/include)
+target_compile_definitions(ca_psp PRIVATE USE_FFMPEG)
+
 if(CA_GAME_ISO)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   set(CA_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
@@ -118,14 +154,14 @@ if(CA_GAME_ISO)
   if(TARGET SDL2::SDL2main)
     target_link_libraries(CodedArms PRIVATE SDL2::SDL2main)
   endif()
-  target_link_libraries(CodedArms PRIVATE ca_engine Threads::Threads SDL2::SDL2)
+  target_link_libraries(CodedArms PRIVATE ca_engine ca_at3 ca_ffmpeg Threads::Threads SDL2::SDL2)
   if(MINGW)
     target_link_options(CodedArms PRIVATE -static-libgcc -static-libstdc++ -static)
   endif()
 
   add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_guest>)
   target_include_directories(ca_psprun PRIVATE src)
-  target_link_libraries(ca_psprun PRIVATE Threads::Threads SDL2::SDL2)
+  target_link_libraries(ca_psprun PRIVATE ca_at3 ca_ffmpeg Threads::Threads SDL2::SDL2)
   target_include_directories(ca_psprun SYSTEM PRIVATE third_party/stb)
   if(MINGW)
     target_link_options(ca_psprun PRIVATE -static-libgcc -static-libstdc++ -static)

@@ -530,6 +530,29 @@ static uint32_t readTimeout(uint32_t ptr) { return ptr ? read32(ptr) : 0; }
 
 static void registerCoreHle();
 
+void mpegNotifyModuleLoaded(const std::string& name, int version); // hle_mpeg.cpp
+
+// Reads the module name and version from an unencrypted PRX on the disc (ELF with the
+// SceModuleInfo at the first segment's p_paddr). Returns -1 when it cannot.
+static int readModuleInfo(const std::string& path, std::string& name) {
+    size_t colon = path.find(":/");
+    if (colon == std::string::npos) return -1;
+    std::string dev = path.substr(0, colon);
+    if (dev != "disc0" && dev != "umd0" && dev != "umd1") return -1;
+    IsoEntry e;
+    if (!g_iso.lookup(path.substr(colon + 2), e) || e.dir || e.size < 0x80) return -1;
+    std::vector<uint8_t> f(e.size);
+    if (g_iso.read(e.lba, 0, f.data(), f.size()) != f.size()) return -1;
+    auto rd32 = [&](size_t o) { uint32_t v; std::memcpy(&v, &f[o], 4); return v; };
+    if (rd32(0) != 0x464C457Fu) return -1; // ELF magic (encrypted "~PSP" modules are not parsed)
+    uint32_t phoff = rd32(0x1C);
+    if (phoff + 0x20 > f.size()) return -1;
+    uint32_t off = rd32(phoff + 0x0C) & 0x7FFFFFFF; // p_paddr: file offset of SceModuleInfo
+    if (off + 32 > f.size()) return -1;
+    name.assign((const char*)&f[off + 4], strnlen((const char*)&f[off + 4], 28));
+    return f[off + 2] | (f[off + 3] << 8);
+}
+
 // ---- module loading -------------------------------------------------------------------
 static bool loadModule(const std::vector<uint8_t>& elf, uint32_t base, uint32_t& entry, uint32_t& gp, uint32_t& end) {
     auto rd = [&](size_t o) { uint32_t v; std::memcpy(&v, &elf[o], 4); return v; };
@@ -905,8 +928,13 @@ static void registerCoreHle() {
     HLE(sceKernelRegisterExitCallback) { ret(c, 0); });
     HLE(sceKernelLoadModule) {
         // System modules shipped on the disc (mpeg, network, audiocodec...) are provided by
-        // the HLE layer itself; report success with a fake module id.
-        log("LoadModule(%s) -> HLE", readString(A(c, 0)).c_str());
+        // the HLE layer itself; report success with a fake module id. Their module info
+        // (name, version) is still read, as some HLE modules depend on the library version.
+        std::string path = readString(A(c, 0));
+        std::string name;
+        int version = readModuleInfo(path, name);
+        log("LoadModule(%s) -> HLE (%s, version %04x)", path.c_str(), name.c_str(), version);
+        if (version >= 0) mpegNotifyModuleLoaded(name, version);
         ret(c, (uint32_t)newUid());
     });
     HLE(sceKernelStartModule) { if (A(c, 3)) write32(A(c, 3), 0); ret(c, 0); });
@@ -922,9 +950,11 @@ static void registerCoreHle() {
     extern void registerIoHle();
     extern void registerDeviceHle();
     extern void registerSasHle();
+    extern void registerMpegHle();
     registerIoHle();
     registerDeviceHle();
     registerSasHle();
+    registerMpegHle();
 }
 
 } // namespace psp::kernel
