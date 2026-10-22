@@ -53,6 +53,9 @@ static inline void wr16_(uint8_t* p, uint16_t v) { memcpy(p, &v, 2); }
 
 void rt_watch_store(Ctx* c, uint32_t pc, uint32_t addr);
 void ca_hook_player_view(Ctx* c);
+void ca_hook_frame_interval(Ctx* c);
+void ca_hook_frame_work_done(Ctx* c);
+void ca_hook_frame_start(Ctx* c);
 
 #define R(n) (c->r[n])
 #define F(n) (c->f[n])

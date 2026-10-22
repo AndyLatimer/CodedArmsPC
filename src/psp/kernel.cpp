@@ -413,8 +413,35 @@ static void afterHle(Ctx* c) {
     yieldIfHigherPriorityReady();
 }
 
+// Debugging: CA_HLE_STATS prints the most frequent (import, caller) pairs every second
+// (CA_HLE_STATS=thread: (import, thread id) pairs).
+static void hleStats(const std::string& name, uint32_t ra) {
+    static std::mutex m;
+    static std::map<std::pair<std::string, uint32_t>, int> counts;
+    static uint64_t last = 0;
+    std::lock_guard<std::mutex> lk(m);
+    counts[{name, ra}]++;
+    uint64_t now = nowUs();
+    if (now - last < 1000000) return;
+    last = now;
+    std::vector<std::pair<int, std::pair<std::string, uint32_t>>> v;
+    for (auto& [k, n] : counts) v.push_back({n, k});
+    std::sort(v.rbegin(), v.rend());
+    std::string out = "[hle]";
+    for (size_t i = 0; i < v.size() && i < 12; ++i) {
+        char b[96];
+        std::snprintf(b, sizeof b, " %s@%08x=%d", v[i].second.first.c_str(), v[i].second.second, v[i].first);
+        out += b;
+    }
+    log("%s", out.c_str());
+    counts.clear();
+}
+
 extern "C" void hle_call(Ctx* c, int idx) {
     ImportSlot& s = g_imports[(size_t)idx];
+    static const bool stats = std::getenv("CA_HLE_STATS") != nullptr;
+    static const bool byThread = stats && std::getenv("CA_HLE_STATS")[0] == 't';
+    if (stats) hleStats(s.name, byThread ? (uint32_t)currentThreadId() : c->r[31]);
     if (g_trace)
         log("%s(%08x, %08x, %08x, %08x) thread=%d ra=%08x", s.name.c_str(), c->r[4], c->r[5], c->r[6], c->r[7], currentThreadId(), c->r[31]);
     if (s.fn) {

@@ -30,6 +30,7 @@
 
 #include "psp/ge.h"
 #include "psp/gpu/gpu.h"
+#include "psp/gpu/button_glyphs.h"
 #include "render/GL.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -260,6 +261,8 @@ void controlThread(std::string path) {
                 }
             } else if (c == "skipfbtex") {
                 psp::gpu::setSkipFramebufferTextures(std::atoi(arg) != 0);
+            } else if (c == "interval") { // frame interval cap in vblanks (0 = the game's)
+                psp::host::g_frameInterval = std::atoi(arg);
             } else if (c == "maxdraw") {
                 psp::gpu::setMaxDraws(std::atoi(arg));
             } else if (c == "quit") {
@@ -287,6 +290,15 @@ int runWithGl(const psp::kernel::BootOptions& opt, int scale, std::vector<std::p
     gs.scale = scale;
     gs.wideAspect = g_aspect;
     psp::gpu::install(gs);
+    if (const char* g = std::getenv("CA_GLYPH_LABELS")) { // cross,circle,square,triangle,l,r,start,select
+        std::vector<std::string> v(1);
+        for (const char* p = g; *p; ++p) {
+            if (*p == ',') v.emplace_back();
+            else v.back() += *p == '_' ? psp::gpu::kGlyphEnter : *p;
+        }
+        v.resize(8);
+        psp::gpu::setButtonLabels({v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]});
+    }
     if (!psp::gpu::renderInit()) return 1;
     std::thread([opt] { std::_Exit(psp::kernel::boot(opt)); }).detach();
     std::sort(shots.begin(), shots.end());

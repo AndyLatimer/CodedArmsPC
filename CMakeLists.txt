@@ -85,6 +85,7 @@ add_library(ca_psp OBJECT
   src/psp/hle_nids.cpp
   src/psp/ge.cpp
   src/psp/gpu/gpu.cpp
+  src/psp/gpu/button_glyphs.cpp
   src/psp/gpu/vertex_decoder.cpp
   src/psp/gpu/texture_decoder.cpp
   src/render/GL.cpp
@@ -180,6 +181,9 @@ if(CA_GAME_ISO)
   if(NOT CA_RECOMP_RESULT EQUAL 0)
     message(FATAL_ERROR "Recompilation failed")
   endif()
+  # Regenerate when the recompiler or the port hooks change.
+  file(GLOB CA_RECOMP_INPUTS ${CMAKE_SOURCE_DIR}/tools/recomp/*.py ${CMAKE_SOURCE_DIR}/tools/recomp/*.tsv)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${CA_RECOMP_INPUTS})
   file(GLOB CA_GEN_SOURCES ${CA_GEN_DIR}/*.c)
   add_library(ca_guest OBJECT ${CA_GEN_SOURCES})
   target_include_directories(ca_guest PRIVATE src ${CA_GEN_DIR})
