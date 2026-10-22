@@ -30,9 +30,17 @@ class Function:
 
 def discover(mod):
     base = mod.base
-    text = mod.text
-    t0, t1 = text.addr + base, text.addr + text.size + base
-    in_text = lambda a: t0 <= a < t1  # noqa: E731
+    ranges = mod.code_ranges
+    t0, t1 = ranges[0]
+
+    def in_text(a):
+        return any(r0 <= a < r1 for r0, r1 in ranges)
+
+    def range_end(a):
+        for r0, r1 in ranges:
+            if r0 <= a < r1:
+                return r1
+        return a
 
     starts = {mod.entry}
     for off, typ in mod.relocs.items():
@@ -40,17 +48,23 @@ def discover(mod):
             w = mod.word(off)
             if w >> 26 == 3:  # jal
                 starts.add(((off + base + 4) & 0xF0000000) | ((w & 0x03FFFFFF) << 2))
-    # Code pointers stored in data.
+    starts |= {r0 for r0, _ in ranges}
+    # Code pointers stored in data, or built in code with relocated lui/addiu pairs.
     code_ptrs = set()
     for off, typ in mod.relocs.items():
         if typ == R_MIPS_32:
             v = mod.word(off)
             if in_text(v):
                 code_ptrs.add(v)
+    # Addresses built in code with lui/addiu are function pointers (switch tables only
+    # ever live in data), so they are always function starts.
+    hilo_ptrs = {v for v in mod.hilo_values if in_text(v) and v % 4 == 0}
+    code_ptrs |= hilo_ptrs
     indirect = set()
     labels_from_ptrs = set()
     for p in code_ptrs:
-        if p in starts or p == t0 or mod.word(p - base - 8) == JR_RA:
+        outside_text = not (t0 <= p < t1)  # pointer tables into the .data code (initialisers)
+        if p in starts or p in hilo_ptrs or p == t0 or outside_text or mod.word(p - base - 8) == JR_RA:
             indirect.add(p)
         else:
             labels_from_ptrs.add(p)
@@ -60,13 +74,16 @@ def discover(mod):
     funcs = {}
     for i, s in enumerate(starts):
         f = Function(s)
-        f.end = starts[i + 1] if i + 1 < len(starts) else t1
+        f.end = min(starts[i + 1] if i + 1 < len(starts) else range_end(s), range_end(s))
         f.indirect = s in indirect
         funcs[s] = f
     for p in labels_from_ptrs:
         f = funcs[starts[bisect.bisect_right(starts, p) - 1]]
         f.labels.add(p)
         f.jump_table_labels.add(p)
+        # Also an entry point: a switch in a neighbouring function may jump here (the
+        # function boundary between them comes from a jal into the middle of the code).
+        f.entries.add(p)
     def containing(addr):
         return funcs[starts[bisect.bisect_right(starts, addr) - 1]]
 

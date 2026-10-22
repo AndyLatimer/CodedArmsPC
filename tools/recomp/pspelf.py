@@ -35,6 +35,7 @@ class PspModule:
         self._load_segment()
         self._relocate()
         self._parse_imports()
+        self._find_code_ranges()
 
     # -- headers -----------------------------------------------------------------------
     def _parse_headers(self):
@@ -90,6 +91,7 @@ class PspModule:
                         raise ValueError("relocation against segment != 0")
                     entries.append((off, info & 0xFF))
         self.relocs = {}
+        self.hilo_values = set()  # full addresses built by relocated lui/addiu (or lw) pairs
         base = self.base
         pending_hi = []
         for off, typ in entries:
@@ -111,6 +113,7 @@ class PspModule:
                     full = ((hw & 0xFFFF) << 16) + slo + base
                     newhi = ((full - (((full & 0xFFFF) ^ 0x8000) - 0x8000)) >> 16) & 0xFFFF
                     self.set_word(hoff, (hw & 0xFFFF0000) | newhi)
+                    self.hilo_values.add(full & 0xFFFFFFFF)
                 pending_hi = []
                 self.set_word(off, (lo & 0xFFFF0000) | ((lo16 + base) & 0xFFFF))
             elif typ != 0:
@@ -134,6 +137,28 @@ class PspModule:
                 nid = self.word(nids_p - self.base + i * 4)
                 self.stubs.append(Stub(lib, nid, funcs_p + i * 8))
             a += entlen * 4
+
+    def _find_code_ranges(self):
+        """Code lives in .text and, for this compiler, also inside .data: static
+        initialisers (C++ constructors) followed by the table of pointers to them.
+        Relocations of type R_MIPS_26/HI16/LO16 only ever apply to instructions, so the
+        relocated instructions in .data delimit that code; it ends where the following
+        pointer table (R_MIPS_32 entries) begins."""
+        b = self.base
+        t = self.text
+        self.code_ranges = [(t.addr + b, t.addr + t.size + b)]
+        try:
+            d = self.section(".data")
+        except KeyError:
+            return
+        d0, d1 = d.addr, d.addr + d.size
+        insn = sorted(o for o, ty in self.relocs.items() if ty in (R_MIPS_26, R_MIPS_HI16, R_MIPS_LO16) and d0 <= o < d1)
+        if not insn:
+            return
+        last = insn[-1]
+        tables = sorted(o for o, ty in self.relocs.items() if ty == R_MIPS_32 and last < o < d1)
+        end = tables[0] if tables else d1
+        self.code_ranges.append((insn[0] + b, end + b))
 
     # -- helpers -----------------------------------------------------------------------
     @property

@@ -62,3 +62,49 @@ if(MINGW)
     target_link_options(${t} PRIVATE -static-libgcc -static-libstdc++ -static)
   endforeach()
 endif()
+
+# ---- Recompiled game (static recompilation of the user's own BOOT.BIN) ----------------
+# Configure with -DCA_GAME_ISO=/path/to/your/CodedArms.iso. The generated C is derived from
+# the game and stays inside the build directory; it is never committed or distributed.
+set(CA_GAME_ISO "" CACHE FILEPATH "Your own Coded Arms (ULES-00124) ISO, needed for the recompiled build")
+add_library(ca_psp OBJECT
+  src/psp/cpu.cpp
+  src/psp/vfpu.cpp
+  src/psp/memory.cpp
+  src/psp/iso.cpp
+  src/psp/kernel.cpp
+  src/psp/hle_io.cpp
+  src/psp/hle_devices.cpp
+  src/psp/hle_nids.cpp
+  src/psp/ge.cpp
+  src/psp/ppsspp/InterpreterVFPU.cpp
+  src/psp/ppsspp/MIPSVFPUUtils.cpp
+)
+target_include_directories(ca_psp PUBLIC src src/psp/ppsspp)
+target_compile_options(ca_psp PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-function -Wno-sign-compare -Wno-missing-field-initializers>)
+find_package(Threads REQUIRED)
+
+if(CA_GAME_ISO)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  set(CA_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
+  message(STATUS "Recompiling BOOT.BIN from ${CA_GAME_ISO}")
+  execute_process(
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/recomp/recompile.py --iso ${CA_GAME_ISO} --out ${CA_GEN_DIR}
+    RESULT_VARIABLE CA_RECOMP_RESULT)
+  if(NOT CA_RECOMP_RESULT EQUAL 0)
+    message(FATAL_ERROR "Recompilation failed")
+  endif()
+  file(GLOB CA_GEN_SOURCES ${CA_GEN_DIR}/*.c)
+  add_library(ca_guest OBJECT ${CA_GEN_SOURCES})
+  target_include_directories(ca_guest PRIVATE src ${CA_GEN_DIR})
+  if(NOT MSVC)
+    target_compile_options(ca_guest PRIVATE -w -fwrapv -fno-strict-aliasing)
+  endif()
+
+  add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_guest>)
+  target_include_directories(ca_psprun PRIVATE src)
+  target_link_libraries(ca_psprun PRIVATE Threads::Threads)
+  if(MINGW)
+    target_link_options(ca_psprun PRIVATE -static-libgcc -static-libstdc++ -static)
+  endif()
+endif()

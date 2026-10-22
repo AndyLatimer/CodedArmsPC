@@ -152,17 +152,11 @@ class Gen:
         if mn == "cvt.s.w": return "F(%d) = (float)(int32_t)FI(%d);" % (fd, fs)
         if mn.startswith("c.") and mn.endswith(".s"):
             cond = i.funct & 15
-            return "c->fcc = rt_fcmp(F(%d), F(%d), %d);" % (fs, ft, cond)
-        # VFPU transfers
-        if mn == "mfv": return T("VI(%d)" % (i.word & 0x7F))
-        if mn == "mtv": return "VI(%d) = R(%d);" % (i.word & 0x7F, rt)
-        if mn == "mfvc": return T("rt_vfpu_getctrl(c, %d)" % (i.word & 0x7F))
-        if mn == "mtvc": return "rt_vfpu_setctrl(c, %d, R(%d));" % (i.word & 0x7F, rt)
-        if mn in ("lv.s", "sv.s", "lv.q", "sv.q", "lvl.q", "lvr.q", "svl.q", "svr.q"):
-            off = i.word & 0xFFFC
-            soff = off - 0x10000 if off & 0x8000 else off
-            return "vfpu_mem(c, 0x%08xu, R(%d) + (uint32_t)%d);" % (i.word, rs, soff)
-        if mn.startswith("v"):
+            return "c->fpcond = rt_fcmp(F(%d), F(%d), %d);" % (fs, ft, cond)
+        # Every VFPU instruction (transfers, loads/stores, arithmetic) goes through the
+        # interpreter, which handles prefixes and register addressing in one place.
+        if mn in ("mfv", "mtv", "mfvc", "mtvc", "lv.s", "sv.s", "lv.q", "sv.q", "lvl.q", "lvr.q",
+                  "svl.q", "svr.q") or mn.startswith("v"):
             return "vfpu_exec(c, 0x%08xu);" % i.word
         if mn in ("halt", "mfic", "mtic", "mfc0", "mtc0"):
             return "rt_privileged(c, 0x%08xu, 0x%08xu);" % (i.word, i.pc)
@@ -179,9 +173,9 @@ class Gen:
             "blez": "(int32_t)R(%d) <= 0" % rs, "bgtz": "(int32_t)R(%d) > 0" % rs,
             "bltz": "(int32_t)R(%d) < 0" % rs, "bgez": "(int32_t)R(%d) >= 0" % rs,
             "bltzal": "(int32_t)R(%d) < 0" % rs, "bgezal": "(int32_t)R(%d) >= 0" % rs,
-            "bc1f": "!c->fcc", "bc1t": "c->fcc",
-            "bvf": "!((c->vcc >> %d) & 1)" % ((i.word >> 18) & 7),
-            "bvt": "((c->vcc >> %d) & 1)" % ((i.word >> 18) & 7),
+            "bc1f": "!c->fpcond", "bc1t": "c->fpcond",
+            "bvf": "!((VFPU_CC >> %d) & 1)" % ((i.word >> 18) & 7),
+            "bvt": "((VFPU_CC >> %d) & 1)" % ((i.word >> 18) & 7),
         }[base_mn]
 
     # -- functions -----------------------------------------------------------------------

@@ -9,18 +9,15 @@
 extern "C" {
 #endif
 
-/* Guest CPU state. One per guest thread. */
+/* Guest CPU state. One per guest thread. The field layout (names, unions, order of
+ * vfpuCtrl/pc/lo/hi/fcr31/fpcond) mirrors PPSSPP's MIPSState so its VFPU interpreter
+ * (src/psp/ppsspp) can operate on this struct directly. */
 typedef struct Ctx {
     uint32_t r[32];
-    uint32_t hi, lo;
-    union { float f[32]; uint32_t u[32]; } fpr;
-    uint32_t fcr31;      /* FPU control/status (rounding mode in bits 0-1) */
-    uint32_t fcc;        /* FPU condition flag */
-    union { float f[128]; uint32_t u[128]; } v; /* VFPU registers, index = mtx*16 + col*4 + row */
-    uint32_t vpfx[3];    /* pending prefixes: S, T, D */
-    uint32_t vpfx_set;   /* bit n: prefix n is pending */
-    uint32_t vcc;        /* VFPU condition codes (6 bits) */
-    uint32_t vctrl[16];  /* VFPU control registers 128..143 */
+    union { float f[32]; uint32_t fi[32]; int32_t fs[32]; };
+    union { float v[128]; uint32_t vi[128]; };  /* PPSSPP "voffset" order */
+    uint32_t vfpuCtrl[16];                      /* 0-2 prefixes S/T/D, 3 condition codes */
+    uint32_t pc, lo, hi, fcr31, fpcond;
     uint8_t* mem;        /* host base of guest memory */
     void* thread;        /* owning runtime thread */
 } Ctx;
@@ -55,10 +52,9 @@ static inline void wr16_(uint8_t* p, uint16_t v) { memcpy(p, &v, 2); }
 #define WR32(a, v) wr32_(HOST(a), (uint32_t)(v))
 
 #define R(n) (c->r[n])
-#define F(n) (c->fpr.f[n])
-#define FI(n) (c->fpr.u[n])
-#define VS_IDX(n) (((((n) >> 2) & 7) << 4) | (((n) & 3) << 2) | (((n) >> 5) & 3))
-#define VI(n) (c->v.u[VS_IDX(n)])
+#define F(n) (c->f[n])
+#define FI(n) (c->fi[n])
+#define VFPU_CC (c->vfpuCtrl[3])
 
 #define ROTR(x, s) ((s) ? (((x) >> (s)) | ((x) << (32 - (s)))) : (x))
 #define CLZ(x) ((x) ? (uint32_t)__builtin_clz(x) : 32u)
@@ -82,10 +78,7 @@ uint32_t rt_f2i(float f, int mode); /* 0 round-nearest, 1 truncate, 2 ceil, 3 fl
 uint32_t rt_fcmp(float a, float b, int cond);
 uint32_t rt_cfc1(Ctx* c, int reg);
 void rt_ctc1(Ctx* c, int reg, uint32_t v);
-uint32_t rt_vfpu_getctrl(Ctx* c, int reg);
-void rt_vfpu_setctrl(Ctx* c, int reg, uint32_t v);
-void vfpu_exec(Ctx* c, uint32_t insn);
-void vfpu_mem(Ctx* c, uint32_t insn, uint32_t addr);
+void vfpu_exec(Ctx* c, uint32_t insn); /* every VFPU instruction, incl. loads/stores and mfv/mtv */
 void call_indirect(Ctx* c, uint32_t addr);
 void hle_call(Ctx* c, int import_index);
 void hle_syscall(Ctx* c, uint32_t code);

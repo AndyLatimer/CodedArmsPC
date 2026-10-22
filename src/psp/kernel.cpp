@@ -1,0 +1,912 @@
+// PSP kernel HLE: module loader, threads/scheduler, synchronisation objects, memory,
+// interrupts and the import dispatch table.
+//
+// Threading model: every guest thread is a host thread, but exactly one of them runs
+// guest code at a time (g_current). Context switches happen only inside HLE calls, which
+// matches the PSP kernel (no time slicing between threads of equal priority; a thread
+// runs until it blocks or a higher-priority thread is woken).
+#include "psp/kernel.h"
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdarg>
+#include <cstdio>
+#include <deque>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include "psp/iso.h"
+#include "psp/memory.h"
+
+namespace psp::kernel {
+
+// ---- logging --------------------------------------------------------------------------
+static bool g_trace = false;
+
+void log(const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    std::fprintf(stderr, "[HLE] ");
+    std::vfprintf(stderr, fmt, a);
+    std::fprintf(stderr, "\n");
+    std::fflush(stderr);
+    va_end(a);
+}
+
+void fatal(Ctx* c, const char* fmt, ...) {
+    va_list a;
+    va_start(a, fmt);
+    std::fprintf(stderr, "[FATAL] ");
+    std::vfprintf(stderr, fmt, a);
+    std::fprintf(stderr, "\n");
+    va_end(a);
+    if (c) {
+        std::fprintf(stderr, "  ra=%08x sp=%08x v0=%08x a0=%08x a1=%08x a2=%08x a3=%08x\n", c->r[31], c->r[29],
+                     c->r[2], c->r[4], c->r[5], c->r[6], c->r[7]);
+    }
+    std::fflush(stderr);
+    std::_Exit(3);
+}
+
+// ---- time ------------------------------------------------------------------------------
+static std::chrono::steady_clock::time_point g_bootTime;
+uint64_t nowUs() {
+    return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - g_bootTime).count();
+}
+
+// ---- threads ---------------------------------------------------------------------------
+enum class TState { Dormant, Ready, Running, Waiting, Dead };
+
+struct Thread {
+    int id = 0;
+    std::string name;
+    uint32_t entry = 0, attr = 0, stackSize = 0, stackAddr = 0, gp = 0;
+    int stackBlock = 0;
+    int priority = 0x20;
+    TState state = TState::Dormant;
+    uint64_t readySeq = 0;
+    Ctx ctx{};
+    std::condition_variable cv;
+    std::thread host;
+    // wait state
+    std::function<bool()> waitCond;
+    uint64_t deadline = 0; // 0 = none
+    bool timedOut = false;
+    bool processCallbacks = false;
+    int exitStatus = 0;
+    int wakeupCount = 0;
+};
+
+static std::mutex g_km;
+static std::condition_variable g_idleCv;
+static std::map<int, std::unique_ptr<Thread>> g_threads;
+static Thread* g_current = nullptr;
+static thread_local Thread* t_self = nullptr;
+static int g_nextUid = 0x1000;
+static uint64_t g_readySeq = 0;
+static std::atomic<bool> g_exit{false};
+static int g_exitStatus = 0;
+static uint32_t g_gp = 0;
+static IsoReader g_iso;
+
+IsoReader& iso() { return g_iso; }
+int newUid() { return g_nextUid++; }
+
+static void makeReady(Thread* t) {
+    t->state = TState::Ready;
+    t->readySeq = ++g_readySeq;
+}
+
+static Thread* pickNext() {
+    Thread* best = nullptr;
+    for (auto& [id, t] : g_threads)
+        if (t->state == TState::Ready && (!best || t->priority < best->priority ||
+                                          (t->priority == best->priority && t->readySeq < best->readySeq)))
+            best = t.get();
+    return best;
+}
+
+// Re-evaluates the conditions of waiting threads and expires timeouts. Caller holds g_km.
+static void reevaluateWaits() {
+    uint64_t now = nowUs();
+    for (auto& [id, t] : g_threads) {
+        if (t->state != TState::Waiting) continue;
+        if (t->waitCond && t->waitCond()) {
+            t->waitCond = nullptr;
+            t->timedOut = false;
+            makeReady(t.get());
+        } else if (t->deadline && now >= t->deadline) {
+            t->waitCond = nullptr;
+            t->timedOut = true;
+            makeReady(t.get());
+        }
+    }
+}
+
+static uint64_t earliestDeadline() {
+    uint64_t best = 0;
+    for (auto& [id, t] : g_threads)
+        if (t->state == TState::Waiting && t->deadline && (!best || t->deadline < best)) best = t->deadline;
+    return best;
+}
+
+static void deliverInterrupts(std::unique_lock<std::mutex>& lk);
+
+// Gives the CPU away. `self` must already be in its new state (Ready/Waiting/Dead).
+// Returns when `self` is scheduled again (or immediately when it is dead).
+static void schedule(std::unique_lock<std::mutex>& lk, Thread* self) {
+    for (;;) {
+        if (g_exit) {
+            if (self && self->state != TState::Dead) { // park forever: the process is exiting
+                g_current = nullptr;
+                g_idleCv.notify_all();
+                self->cv.wait(lk, [] { return false; });
+            }
+            return;
+        }
+        reevaluateWaits();
+        Thread* next = pickNext();
+        if (next) {
+            g_current = next;
+            next->state = TState::Running;
+            if (next == self) return;
+            next->cv.notify_one();
+            if (!self || self->state == TState::Dead) return;
+            self->cv.wait(lk, [self] { return (g_current == self && self->state == TState::Running) || g_exit; });
+            if (g_exit) continue;
+            return;
+        }
+        // Nothing is ready: idle on this host thread until a deadline or an external event.
+        g_current = nullptr;
+        deliverInterrupts(lk);
+        if (pickNext()) continue;
+        uint64_t dl = earliestDeadline();
+        uint64_t vbl = nowUs() + 16683; // wake at least once per frame to deliver vblank
+        uint64_t until = dl ? std::min(dl, vbl) : vbl;
+        g_idleCv.wait_until(lk, g_bootTime + std::chrono::microseconds(until));
+    }
+}
+
+int currentThreadId() { return t_self ? t_self->id : 0; }
+
+bool waitUntil(const std::function<bool()>& ready, uint64_t timeoutUs, bool processCallbacks) {
+    std::unique_lock<std::mutex> lk(g_km);
+    Thread* self = t_self;
+    if (ready && ready()) return true;
+    self->waitCond = ready;
+    self->deadline = timeoutUs ? nowUs() + timeoutUs : 0;
+    self->timedOut = false;
+    self->processCallbacks = processCallbacks;
+    self->state = TState::Waiting;
+    schedule(lk, self);
+    return !self->timedOut;
+}
+
+void delayCurrentThread(uint64_t us, bool processCallbacks) {
+    // A delay is a wait with no condition: only the deadline ends it.
+    std::unique_lock<std::mutex> lk(g_km);
+    Thread* self = t_self;
+    self->waitCond = nullptr;
+    self->deadline = nowUs() + std::max<uint64_t>(us, 1);
+    self->processCallbacks = processCallbacks;
+    self->state = TState::Waiting;
+    schedule(lk, self);
+}
+
+void notifyStateChanged() {
+    std::lock_guard<std::mutex> lk(g_km);
+    reevaluateWaits();
+    g_idleCv.notify_all();
+}
+
+void yieldIfHigherPriorityReady() {
+    std::unique_lock<std::mutex> lk(g_km);
+    Thread* self = t_self;
+    if (!self) return;
+    reevaluateWaits();
+    Thread* n = pickNext();
+    if (n && n->priority < self->priority) {
+        makeReady(self);
+        schedule(lk, self);
+    }
+}
+
+// ---- guest calls from the host (interrupts, callbacks) ----------------------------------
+static uint32_t g_intrStackTop = 0;
+
+static uint32_t g_intrSp = 0; // next free interrupt-stack address (nested calls go below)
+
+void runGuestFunction(uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t* v0) {
+    Ctx c{};
+    c.mem = g_mem;
+    c.vfpuCtrl[0] = 0xe4; c.vfpuCtrl[1] = 0xe4; c.vfpuCtrl[3] = 0x3f;
+    c.r[4] = a0; c.r[5] = a1; c.r[6] = a2; c.r[7] = a3;
+    c.r[28] = g_gp;
+    uint32_t saved = g_intrSp;
+    uint32_t sp = saved ? saved : g_intrStackTop;
+    c.r[29] = sp - 16;
+    g_intrSp = sp - 0x4000; // 16 KB per nesting level
+    call_indirect(&c, addr);
+    g_intrSp = saved;
+    if (v0) *v0 = c.r[2];
+}
+
+struct SubIntr {
+    uint32_t handler = 0, arg = 0;
+    bool enabled = false;
+};
+static std::map<std::pair<int, int>, SubIntr> g_subIntrs;
+static uint64_t g_lastVblank = 0;
+static std::deque<std::pair<int, uint32_t>> g_pendingIntr;
+struct QueuedCall { uint32_t addr, a0, a1, a2; };
+static std::deque<QueuedCall> g_queuedCalls;
+static std::atomic<bool> g_inInterrupt{false};
+
+void queueGuestCall(uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2) {
+    std::lock_guard<std::mutex> lk(g_km);
+    g_queuedCalls.push_back({addr, a0, a1, a2});
+    g_idleCv.notify_all();
+}
+
+void registerSubIntr(int intno, int subno, uint32_t handler, uint32_t arg) {
+    std::lock_guard<std::mutex> lk(g_km);
+    g_subIntrs[{intno, subno}] = {handler, arg, false};
+}
+void enableSubIntr(int intno, int subno, bool enable) {
+    std::lock_guard<std::mutex> lk(g_km);
+    g_subIntrs[{intno, subno}].enabled = enable;
+}
+void raiseInterrupt(int intno, uint32_t arg2) {
+    std::lock_guard<std::mutex> lk(g_km);
+    g_pendingIntr.push_back({intno, arg2});
+    g_idleCv.notify_all();
+}
+
+static constexpr int kIntrVblank = 30;
+
+// Runs pending interrupt handlers. Called with g_km held; releases it while guest code runs.
+static void deliverInterrupts(std::unique_lock<std::mutex>& lk) {
+    if (g_inInterrupt) return;
+    uint64_t vcount = nowUs() * 60000ull / 1001000000ull; // 59.94 Hz
+    if (vcount > g_lastVblank) {
+        g_lastVblank = vcount;
+        g_pendingIntr.push_back({kIntrVblank, 0});
+    }
+    while (!g_queuedCalls.empty()) {
+        QueuedCall qc = g_queuedCalls.front();
+        g_queuedCalls.pop_front();
+        Thread* prevCurrent = g_current;
+        g_inInterrupt = true;
+        lk.unlock();
+        runGuestFunction(qc.addr, qc.a0, qc.a1, qc.a2, 0);
+        lk.lock();
+        g_inInterrupt = false;
+        g_current = prevCurrent;
+    }
+    while (!g_pendingIntr.empty()) {
+        auto [intno, arg2] = g_pendingIntr.front();
+        g_pendingIntr.pop_front();
+        std::vector<SubIntr> handlers;
+        for (auto& [key, s] : g_subIntrs)
+            if (key.first == intno && s.enabled && s.handler) handlers.push_back(s);
+        if (handlers.empty()) continue;
+        Thread* prevCurrent = g_current;
+        g_inInterrupt = true;
+        lk.unlock();
+        for (auto& [key, s] : g_subIntrs) {
+            if (key.first != intno || !s.enabled || !s.handler) continue;
+            runGuestFunction(s.handler, (uint32_t)key.second, s.arg, arg2, 0);
+        }
+        lk.lock();
+        g_inInterrupt = false;
+        g_current = prevCurrent;
+    }
+    reevaluateWaits();
+}
+
+// ---- callbacks -------------------------------------------------------------------------
+struct Callback {
+    std::string name;
+    uint32_t func = 0, arg = 0;
+    int notifyCount = 0;
+    uint32_t notifyArg = 0;
+    int ownerThread = 0;
+};
+static std::map<int, Callback> g_callbacks;
+
+void notifyCallback(int cbid, uint32_t arg1, uint32_t arg2) {
+    std::lock_guard<std::mutex> lk(g_km);
+    auto it = g_callbacks.find(cbid);
+    if (it == g_callbacks.end()) return;
+    it->second.notifyCount++;
+    it->second.notifyArg = arg2;
+    (void)arg1;
+}
+
+// Runs notified callbacks owned by the current thread. Returns how many ran.
+static int runCallbacks() {
+    int ran = 0;
+    for (;;) {
+        Callback cb;
+        int id = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_km);
+            for (auto& [cid, c] : g_callbacks)
+                if (c.notifyCount > 0 && c.ownerThread == currentThreadId()) {
+                    id = cid;
+                    cb = c;
+                    c.notifyCount = 0;
+                    break;
+                }
+        }
+        if (!id) return ran;
+        uint32_t ret = 0;
+        runGuestFunction(cb.func, (uint32_t)cb.notifyCount, cb.notifyArg, cb.arg, 0, &ret);
+        ++ran;
+        if (ret) {
+            std::lock_guard<std::mutex> lk(g_km);
+            g_callbacks.erase(id);
+        }
+    }
+}
+
+// ---- HLE dispatch ----------------------------------------------------------------------
+static std::unordered_map<std::string, HleFn>& registry() {
+    static std::unordered_map<std::string, HleFn> r;
+    return r;
+}
+void registerHle(const char* name, HleFn fn) { registry()[name] = std::move(fn); }
+
+struct ImportSlot {
+    std::string name;
+    HleFn fn;
+    bool warned = false;
+};
+static std::vector<ImportSlot> g_imports;
+static std::unordered_map<uint32_t, int> g_importByStub;
+
+const char* nidName(uint32_t nid); // hle_nids.cpp
+
+static void bindImports() {
+    g_imports.resize(g_hle_import_count);
+    for (unsigned i = 0; i < g_hle_import_count; ++i) {
+        const HleImport& im = g_hle_imports[i];
+        const char* n = nidName(im.nid);
+        g_imports[i].name = n ? n : (std::string(im.lib) + "_" + std::to_string(im.nid));
+        auto it = registry().find(g_imports[i].name);
+        if (it != registry().end()) g_imports[i].fn = it->second;
+        g_importByStub[im.stub] = (int)i;
+    }
+    int bound = 0;
+    for (auto& s : g_imports) bound += s.fn ? 1 : 0;
+    log("imports bound: %d / %u", bound, g_hle_import_count);
+}
+
+static void afterHle(Ctx* c) {
+    (void)c;
+    if (g_inInterrupt) return;
+    if (g_exit) {
+        std::unique_lock<std::mutex> lk(g_km);
+        schedule(lk, t_self);
+    }
+    {
+        std::unique_lock<std::mutex> lk(g_km);
+        deliverInterrupts(lk);
+    }
+    yieldIfHigherPriorityReady();
+}
+
+extern "C" void hle_call(Ctx* c, int idx) {
+    ImportSlot& s = g_imports[(size_t)idx];
+    if (g_trace)
+        log("%s(%08x, %08x, %08x, %08x) thread=%d", s.name.c_str(), c->r[4], c->r[5], c->r[6], c->r[7], currentThreadId());
+    if (s.fn) {
+        s.fn(c);
+    } else {
+        if (!s.warned) {
+            log("UNIMPLEMENTED %s (a0=%08x a1=%08x) -> 0", s.name.c_str(), c->r[4], c->r[5]);
+            s.warned = true;
+        }
+        c->r[2] = 0;
+    }
+    afterHle(c);
+}
+
+bool callImportByAddress(Ctx* c, uint32_t addr) {
+    auto it = g_importByStub.find(addr);
+    if (it == g_importByStub.end()) return false;
+    hle_call(c, it->second);
+    return true;
+}
+
+// ---- thread host body -----------------------------------------------------------------
+static void exitThread(Thread* t, int status, bool deleteIt);
+
+static void threadMain(Thread* t) {
+    t_self = t;
+    {
+        std::unique_lock<std::mutex> lk(g_km);
+        t->cv.wait(lk, [t] { return (g_current == t && t->state == TState::Running) || g_exit; });
+        if (g_exit) return;
+    }
+    call_indirect(&t->ctx, t->entry);
+    exitThread(t, (int)t->ctx.r[2], false);
+}
+
+static void exitThread(Thread* t, int status, bool deleteIt) {
+    std::unique_lock<std::mutex> lk(g_km);
+    (void)deleteIt; // the host thread ends either way; the id stays valid for WaitThreadEnd
+    t->exitStatus = status;
+    t->state = TState::Dead;
+    log("thread %d '%s' exited (%d)", t->id, t->name.c_str(), status);
+    g_idleCv.notify_all();
+    schedule(lk, t);
+}
+
+// The calling host thread will never run guest code again (its guest thread has ended).
+[[noreturn]] static void parkForever() {
+    std::unique_lock<std::mutex> lk(g_km);
+    t_self->cv.wait(lk, [] { return false; });
+    std::abort();
+}
+
+static Thread* findThread(int id) {
+    if (id == 0) return t_self;
+    auto it = g_threads.find(id);
+    return it == g_threads.end() ? nullptr : it->second.get();
+}
+
+static Thread* createThread(const std::string& name, uint32_t entry, int prio, uint32_t stackSize, uint32_t attr) {
+    auto t = std::make_unique<Thread>();
+    t->id = newUid();
+    t->name = name;
+    t->entry = entry;
+    t->priority = prio;
+    t->attr = attr;
+    t->stackSize = (std::max<uint32_t>(stackSize, 0x200) + 0xFF) & ~0xFFu;
+    t->stackAddr = g_userPartition.alloc(t->stackSize, 1, 0, 256, &t->stackBlock);
+    if (!t->stackAddr) return nullptr;
+    std::memset(hostPtr(t->stackAddr), 0xFF, t->stackSize);
+    t->gp = g_gp;
+    Thread* raw = t.get();
+    g_threads[raw->id] = std::move(t);
+    return raw;
+}
+
+static void startThread(Thread* t, uint32_t argSize, uint32_t argp) {
+    Ctx& c = t->ctx;
+    std::memset(&c, 0, sizeof(c));
+    c.mem = g_mem;
+    c.vfpuCtrl[0] = 0xe4; c.vfpuCtrl[1] = 0xe4; c.vfpuCtrl[2] = 0; c.vfpuCtrl[3] = 0x3f;
+    uint32_t sp = t->stackAddr + t->stackSize - 64;
+    if (argp && argSize) {
+        sp -= (argSize + 15) & ~15u;
+        std::memcpy(hostPtr(sp), hostPtr(argp), argSize);
+        c.r[5] = sp;
+    } else {
+        c.r[5] = 0;
+    }
+    c.r[4] = argSize;
+    c.r[28] = t->gp;
+    c.r[29] = sp - 64;
+    c.r[31] = 0;
+    c.thread = t;
+    makeReady(t);
+    t->host = std::thread(threadMain, t);
+    t->host.detach();
+}
+
+// ---- semaphores / event flags ----------------------------------------------------------
+struct Sema {
+    std::string name;
+    int count = 0, max = 0;
+    uint32_t attr = 0;
+};
+struct EventFlag {
+    std::string name;
+    uint32_t pattern = 0, attr = 0;
+    int waiters = 0;
+};
+static std::map<int, Sema> g_semas;
+static std::map<int, EventFlag> g_evfs;
+
+static uint32_t readTimeout(uint32_t ptr) { return ptr ? read32(ptr) : 0; }
+
+static void registerCoreHle();
+
+// ---- module loading -------------------------------------------------------------------
+static bool loadModule(const std::vector<uint8_t>& elf, uint32_t base, uint32_t& entry, uint32_t& gp, uint32_t& end) {
+    auto rd = [&](size_t o) { uint32_t v; std::memcpy(&v, &elf[o], 4); return v; };
+    auto rd16 = [&](size_t o) { uint16_t v; std::memcpy(&v, &elf[o], 2); return v; };
+    if (elf.size() < 52 || std::memcmp(elf.data(), "\x7f" "ELF", 4) != 0 || rd16(16) != 0xFFA0) return false;
+    uint32_t phoff = rd(28), shoff = rd(32);
+    uint16_t shnum = rd16(48);
+    uint32_t segOff = rd(phoff + 4), segFile = rd(phoff + 16), segMem = rd(phoff + 20);
+    std::memset(hostPtr(base), 0, segMem);
+    std::memcpy(hostPtr(base), &elf[segOff], segFile);
+    // Relocations: identical algorithm to tools/recomp/pspelf.py (verified on this module).
+    std::vector<uint32_t> pendingHi;
+    for (uint16_t i = 0; i < shnum; ++i) {
+        size_t sh = shoff + i * 40u;
+        if (rd(sh + 4) != 0x700000A0) continue;
+        uint32_t off = rd(sh + 16), size = rd(sh + 20);
+        for (uint32_t k = 0; k < size; k += 8) {
+            uint32_t at = rd(off + k), info = rd(off + k + 4), type = info & 0xFF;
+            uint32_t addr = base + at;
+            uint32_t w = read32(addr);
+            switch (type) {
+            case 2: write32(addr, w + base); break;
+            case 4: {
+                uint32_t target = ((w & 0x03FFFFFF) << 2) + base;
+                write32(addr, (w & 0xFC000000) | ((target >> 2) & 0x03FFFFFF));
+                break;
+            }
+            case 5: pendingHi.push_back(addr); break;
+            case 6: {
+                int32_t slo = (int16_t)(w & 0xFFFF);
+                for (uint32_t h : pendingHi) {
+                    uint32_t hw = read32(h);
+                    uint32_t full = ((hw & 0xFFFF) << 16) + (uint32_t)slo + base;
+                    uint32_t newhi = ((full - (uint32_t)(int32_t)(int16_t)(full & 0xFFFF)) >> 16) & 0xFFFF;
+                    write32(h, (hw & 0xFFFF0000) | newhi);
+                }
+                pendingHi.clear();
+                write32(addr, (w & 0xFFFF0000) | ((w + base) & 0xFFFF));
+                break;
+            }
+            default: break;
+            }
+        }
+    }
+    entry = base + rd(24);
+    // .rodata.sceModuleInfo: u16 attr, u16 ver, char name[28], u32 gp, ...
+    gp = 0;
+    uint32_t shstr = rd(shoff + rd16(50) * 40u + 16);
+    for (uint16_t i = 0; i < shnum; ++i) {
+        size_t sh = shoff + i * 40u;
+        const char* nm = reinterpret_cast<const char*>(&elf[shstr + rd(sh)]);
+        if (std::strcmp(nm, ".rodata.sceModuleInfo") == 0) gp = read32(base + rd(sh + 12) + 32);
+    }
+    end = base + segMem;
+    return true;
+}
+
+static std::atomic<bool> g_exitRequested{false};
+void requestExit() { g_exitRequested = true; }
+
+int boot(const BootOptions& opt) {
+    g_trace = opt.traceHle;
+    g_bootTime = std::chrono::steady_clock::now();
+    if (!initMemory()) { log("cannot allocate guest memory"); return 1; }
+    if (!g_iso.open(opt.isoPath)) { log("cannot open %s", opt.isoPath.c_str()); return 1; }
+    IsoEntry e;
+    if (!g_iso.lookup("PSP_GAME/SYSDIR/BOOT.BIN", e)) { log("BOOT.BIN not found"); return 1; }
+    std::vector<uint8_t> elf(e.size);
+    g_iso.read(e.lba, 0, elf.data(), e.size);
+    uint32_t entry = 0, end = 0;
+    if (!loadModule(elf, g_module_base, entry, g_gp, end)) { log("module load failed"); return 1; }
+    if (entry != g_module_entry) {
+        log("entry mismatch: loaded %08x, recompiled %08x (wrong game image?)", entry, g_module_entry);
+        return 1;
+    }
+    log("module loaded at %08x-%08x, entry %08x, gp %08x", g_module_base, end, entry, g_gp);
+
+    g_userPartition.init(kUserRam, kRamEnd);
+    g_userPartition.reserve(kUserRam, 0x4000);              // loader area below the module
+    g_userPartition.reserve(g_module_base, end - g_module_base);
+    // Interrupt handler stack in kernel RAM (not visible to the game's allocations).
+    g_intrStackTop = kKernelRam + 0x00400000;
+
+    registerCoreHle();
+    bindImports();
+
+    // The main thread runs the module entry with the boot path as its argument.
+    const char* path = "disc0:/PSP_GAME/SYSDIR/EBOOT.BIN";
+    uint32_t argAddr = kKernelRam + 0x00100000;
+    writeString(argAddr, path);
+    Thread* mainThread;
+    {
+        std::lock_guard<std::mutex> lk(g_km);
+        mainThread = createThread("user_main", entry, 0x20, 0x40000, 0x80000000);
+        startThread(mainThread, (uint32_t)std::strlen(path) + 1, argAddr);
+    }
+    // This host thread becomes the idle/scheduler loop until the game exits.
+    {
+        std::unique_lock<std::mutex> lk(g_km);
+        schedule(lk, nullptr);
+        g_idleCv.wait(lk, [] {
+            if (g_exit) return true;
+            for (auto& [id, t] : g_threads)
+                if (t->state != TState::Dead) return false;
+            return true;
+        });
+    }
+    return g_exitStatus;
+}
+
+// ---- core HLE functions ---------------------------------------------------------------
+#define HLE(name) registerHle(#name, [](Ctx* c)
+
+static void registerCoreHle() {
+    // ThreadManForUser: threads
+    HLE(sceKernelCreateThread) {
+        std::lock_guard<std::mutex> lk(g_km);
+        int prio = (int)A(c, 2);
+        if (prio < 0x08 || prio > 0x77) { ret(c, ERR_ILLEGAL_PRIORITY); return; }
+        Thread* t = createThread(readString(A(c, 0), 32), A(c, 1), prio, A(c, 3), A(c, 4));
+        ret(c, t ? (uint32_t)t->id : ERR_NO_MEMORY);
+        if (t) log("thread %d '%s' created entry=%08x prio=%x stack=%x", t->id, t->name.c_str(), t->entry, prio, t->stackSize);
+    });
+    HLE(sceKernelStartThread) {
+        {
+            std::lock_guard<std::mutex> lk(g_km);
+            Thread* t = findThread((int)A(c, 0));
+            if (!t) { ret(c, ERR_UNKNOWN_THID); return; }
+            if (t->state != TState::Dormant) { ret(c, ERR_NOT_DORMANT); return; }
+            startThread(t, A(c, 1), A(c, 2));
+            ret(c, 0);
+        }
+    });
+    HLE(sceKernelExitThread) { exitThread(t_self, (int)A(c, 0), false); parkForever(); });
+    HLE(sceKernelExitDeleteThread) { exitThread(t_self, (int)A(c, 0), true); parkForever(); });
+    HLE(sceKernelDeleteThread) {
+        std::lock_guard<std::mutex> lk(g_km);
+        Thread* t = findThread((int)A(c, 0));
+        ret(c, t ? 0 : ERR_UNKNOWN_THID);
+    });
+    auto terminate = [](Ctx* c) {
+        std::lock_guard<std::mutex> lk(g_km);
+        Thread* t = findThread((int)A(c, 0));
+        if (!t) { ret(c, ERR_UNKNOWN_THID); return; }
+        // The host thread stays blocked forever; it is never scheduled again.
+        t->state = TState::Dead;
+        t->waitCond = nullptr;
+        g_idleCv.notify_all();
+        ret(c, 0);
+    };
+    registerHle("sceKernelTerminateThread", terminate);
+    registerHle("sceKernelTerminateDeleteThread", terminate);
+    HLE(sceKernelGetThreadId) { ret(c, (uint32_t)currentThreadId()); });
+    HLE(sceKernelChangeThreadPriority) {
+        {
+            std::lock_guard<std::mutex> lk(g_km);
+            Thread* t = findThread((int)A(c, 0));
+            if (!t) { ret(c, ERR_UNKNOWN_THID); return; }
+            int p = (int)A(c, 1);
+            if (p == 0) p = t_self->priority;
+            t->priority = p;
+            ret(c, 0);
+        }
+    });
+    HLE(sceKernelDelayThread) { delayCurrentThread(A(c, 0)); ret(c, 0); });
+    HLE(sceKernelDelayThreadCB) { runCallbacks(); delayCurrentThread(A(c, 0), true); runCallbacks(); ret(c, 0); });
+    HLE(sceKernelSleepThread) {
+        Thread* self = t_self;
+        waitUntil([self] {
+            if (self->wakeupCount > 0) { self->wakeupCount--; return true; }
+            return false;
+        }, 0);
+        ret(c, 0);
+    });
+    HLE(sceKernelWakeupThread) {
+        {
+            std::lock_guard<std::mutex> lk(g_km);
+            Thread* t = findThread((int)A(c, 0));
+            if (!t) { ret(c, ERR_UNKNOWN_THID); return; }
+            t->wakeupCount++;
+            reevaluateWaits();
+        }
+        ret(c, 0);
+    });
+    HLE(sceKernelSuspendThread) { ret(c, 0); });
+    HLE(sceKernelResumeThread) { ret(c, 0); });
+    HLE(sceKernelWaitThreadEnd) {
+        int id = (int)A(c, 0);
+        uint32_t tptr = A(c, 1);
+        bool ok = waitUntil([id] {
+            Thread* t = findThread(id);
+            return !t || t->state == TState::Dead || t->state == TState::Dormant;
+        }, readTimeout(tptr));
+        if (!ok) { ret(c, ERR_WAIT_TIMEOUT); return; }
+        std::lock_guard<std::mutex> lk(g_km);
+        Thread* t = findThread(id);
+        ret(c, t ? (uint32_t)t->exitStatus : ERR_UNKNOWN_THID);
+    });
+    HLE(sceKernelGetSystemTimeLow) { ret(c, (uint32_t)nowUs()); });
+
+    // Callbacks
+    HLE(sceKernelCreateCallback) {
+        std::lock_guard<std::mutex> lk(g_km);
+        int id = newUid();
+        g_callbacks[id] = {readString(A(c, 0), 32), A(c, 1), A(c, 2), 0, 0, currentThreadId()};
+        ret(c, (uint32_t)id);
+    });
+    HLE(sceKernelDeleteCallback) {
+        std::lock_guard<std::mutex> lk(g_km);
+        ret(c, g_callbacks.erase((int)A(c, 0)) ? 0 : ERR_UNKNOWN_CBID);
+    });
+    HLE(sceKernelCheckCallback) { ret(c, (uint32_t)(runCallbacks() > 0)); });
+
+    // Semaphores
+    HLE(sceKernelCreateSema) {
+        std::lock_guard<std::mutex> lk(g_km);
+        int id = newUid();
+        g_semas[id] = {readString(A(c, 0), 32), (int)A(c, 2), (int)A(c, 3), A(c, 1)};
+        ret(c, (uint32_t)id);
+    });
+    HLE(sceKernelDeleteSema) {
+        std::lock_guard<std::mutex> lk(g_km);
+        ret(c, g_semas.erase((int)A(c, 0)) ? 0 : ERR_UNKNOWN_SEMID);
+        reevaluateWaits();
+    });
+    HLE(sceKernelSignalSema) {
+        {
+            std::lock_guard<std::mutex> lk(g_km);
+            auto it = g_semas.find((int)A(c, 0));
+            if (it == g_semas.end()) { ret(c, ERR_UNKNOWN_SEMID); return; }
+            int n = (int)A(c, 1);
+            if (it->second.count + n > it->second.max) { ret(c, ERR_SEMA_OVF); return; }
+            it->second.count += n;
+            reevaluateWaits();
+            ret(c, 0);
+        }
+    });
+    HLE(sceKernelWaitSema) {
+        int id = (int)A(c, 0), need = (int)A(c, 1);
+        uint32_t tptr = A(c, 2);
+        bool exists = true;
+        bool ok = waitUntil([id, need, &exists] {
+            auto it = g_semas.find(id);
+            if (it == g_semas.end()) { exists = false; return true; }
+            if (it->second.count >= need) { it->second.count -= need; return true; }
+            return false;
+        }, readTimeout(tptr));
+        if (!exists) { ret(c, ERR_UNKNOWN_SEMID); return; }
+        if (!ok) { if (tptr) write32(tptr, 0); ret(c, ERR_WAIT_TIMEOUT); return; }
+        ret(c, 0);
+    });
+    HLE(sceKernelPollSema) {
+        std::lock_guard<std::mutex> lk(g_km);
+        auto it = g_semas.find((int)A(c, 0));
+        if (it == g_semas.end()) { ret(c, ERR_UNKNOWN_SEMID); return; }
+        int need = (int)A(c, 1);
+        if (it->second.count >= need) { it->second.count -= need; ret(c, 0); }
+        else ret(c, ERR_SEMA_ZERO);
+    });
+
+    // Event flags
+    HLE(sceKernelCreateEventFlag) {
+        std::lock_guard<std::mutex> lk(g_km);
+        int id = newUid();
+        g_evfs[id] = {readString(A(c, 0), 32), A(c, 2), A(c, 1), 0};
+        ret(c, (uint32_t)id);
+    });
+    HLE(sceKernelDeleteEventFlag) {
+        std::lock_guard<std::mutex> lk(g_km);
+        ret(c, g_evfs.erase((int)A(c, 0)) ? 0 : ERR_UNKNOWN_EVFID);
+        reevaluateWaits();
+    });
+    HLE(sceKernelSetEventFlag) {
+        std::lock_guard<std::mutex> lk(g_km);
+        auto it = g_evfs.find((int)A(c, 0));
+        if (it == g_evfs.end()) { ret(c, ERR_UNKNOWN_EVFID); return; }
+        it->second.pattern |= A(c, 1);
+        reevaluateWaits();
+        ret(c, 0);
+    });
+    HLE(sceKernelClearEventFlag) {
+        std::lock_guard<std::mutex> lk(g_km);
+        auto it = g_evfs.find((int)A(c, 0));
+        if (it == g_evfs.end()) { ret(c, ERR_UNKNOWN_EVFID); return; }
+        it->second.pattern &= A(c, 1);
+        ret(c, 0);
+    });
+    HLE(sceKernelWaitEventFlag) {
+        int id = (int)A(c, 0);
+        uint32_t bits = A(c, 1), mode = A(c, 2), outp = A(c, 3), tptr = A(c, 4);
+        if (bits == 0) { ret(c, ERR_EVF_ILPAT); return; }
+        bool exists = true;
+        uint32_t matched = 0;
+        bool ok = waitUntil([id, bits, mode, &exists, &matched] {
+            auto it = g_evfs.find(id);
+            if (it == g_evfs.end()) { exists = false; return true; }
+            uint32_t p = it->second.pattern;
+            bool hit = (mode & 1) ? (p & bits) != 0 : (p & bits) == bits; // bit0: OR wait
+            if (!hit) return false;
+            matched = p;
+            if (mode & 0x20) it->second.pattern = 0;          // clear all
+            else if (mode & 0x10) it->second.pattern &= ~bits; // clear matched bits
+            return true;
+        }, readTimeout(tptr));
+        if (!exists) { ret(c, ERR_UNKNOWN_EVFID); return; }
+        if (outp) write32(outp, matched);
+        if (!ok) { if (tptr) write32(tptr, 0); ret(c, ERR_WAIT_TIMEOUT); return; }
+        ret(c, 0);
+    });
+
+    // SysMemUserForUser
+    HLE(sceKernelAllocPartitionMemory) {
+        std::lock_guard<std::mutex> lk(g_km);
+        int id = 0;
+        uint32_t type = A(c, 2), size = A(c, 3), addr = A(c, 4);
+        uint32_t a = g_userPartition.alloc(size, type == 1 ? 1 : (type == 2 ? 2 : 0), addr, 256, &id);
+        log("AllocPartitionMemory('%s', type %u, size %x) -> %08x", readString(A(c, 1), 32).c_str(), type, size, a);
+        ret(c, a ? (uint32_t)id : ERR_NO_MEMORY);
+    });
+    HLE(sceKernelFreePartitionMemory) {
+        std::lock_guard<std::mutex> lk(g_km);
+        ret(c, g_userPartition.free((int)A(c, 0)) ? 0 : 0x800200CA);
+    });
+    HLE(sceKernelGetBlockHeadAddr) {
+        std::lock_guard<std::mutex> lk(g_km);
+        ret(c, g_userPartition.blockAddr((int)A(c, 0)));
+    });
+    HLE(sceKernelTotalFreeMemSize) { ret(c, g_userPartition.freeTotal()); });
+
+    // Kernel_Library: interrupts are never truly disabled in HLE; return the "enabled" state.
+    HLE(sceKernelCpuSuspendIntr) { ret(c, 1); });
+    HLE(sceKernelCpuResumeIntr) { ret(c, 0); });
+
+    // InterruptManager
+    HLE(sceKernelRegisterSubIntrHandler) { registerSubIntr((int)A(c, 0), (int)A(c, 1), A(c, 2), A(c, 3)); ret(c, 0); });
+    HLE(sceKernelReleaseSubIntrHandler) { registerSubIntr((int)A(c, 0), (int)A(c, 1), 0, 0); ret(c, 0); });
+    HLE(sceKernelEnableSubIntr) { enableSubIntr((int)A(c, 0), (int)A(c, 1), true); ret(c, 0); });
+
+    // UtilsForUser
+    HLE(sceKernelLibcClock) { ret(c, (uint32_t)nowUs()); });
+    HLE(sceKernelLibcTime) {
+        uint32_t t = (uint32_t)std::time(nullptr);
+        if (A(c, 0)) write32(A(c, 0), t);
+        ret(c, t);
+    });
+    HLE(sceKernelLibcGettimeofday) {
+        auto now = std::chrono::system_clock::now().time_since_epoch();
+        uint64_t us = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+        if (A(c, 0)) { write32(A(c, 0), (uint32_t)(us / 1000000)); write32(A(c, 0) + 4, (uint32_t)(us % 1000000)); }
+        ret(c, 0);
+    });
+    HLE(sceKernelDcacheWritebackAll) { ret(c, 0); });
+    HLE(sceKernelDcacheWritebackRange) { ret(c, 0); });
+
+    // LoadExecForUser / ModuleMgrForUser / StdioForUser / sceSuspendForUser
+    HLE(sceKernelExitGame) {
+        log("game requested exit");
+        {
+            std::lock_guard<std::mutex> lk(g_km);
+            g_exit = true;
+            g_idleCv.notify_all();
+            for (auto& [id, t] : g_threads) t->cv.notify_all();
+        }
+        std::unique_lock<std::mutex> lk(g_km);
+        schedule(lk, t_self);
+    });
+    HLE(sceKernelRegisterExitCallback) { ret(c, 0); });
+    HLE(sceKernelLoadModule) {
+        // System modules shipped on the disc (mpeg, network, audiocodec...) are provided by
+        // the HLE layer itself; report success with a fake module id.
+        log("LoadModule(%s) -> HLE", readString(A(c, 0)).c_str());
+        ret(c, (uint32_t)newUid());
+    });
+    HLE(sceKernelStartModule) { if (A(c, 3)) write32(A(c, 3), 0); ret(c, 0); });
+    HLE(sceKernelUnloadModule) { ret(c, 0); });
+    HLE(sceKernelSelfStopUnloadModule) { ret(c, 0); });
+    HLE(sceKernelStdin) { ret(c, 0); });
+    HLE(sceKernelStdout) { ret(c, 1); });
+    HLE(sceKernelStderr) { ret(c, 2); });
+    HLE(sceKernelPowerLock) { ret(c, 0); });
+    HLE(sceKernelPowerUnlock) { ret(c, 0); });
+    HLE(sceKernelPowerTick) { ret(c, 0); });
+
+    extern void registerIoHle();
+    extern void registerDeviceHle();
+    registerIoHle();
+    registerDeviceHle();
+}
+
+} // namespace psp::kernel
