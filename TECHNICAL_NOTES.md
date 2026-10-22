@@ -224,33 +224,17 @@ recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
 - En la PSP el canal alfa del framebuffer es el stencil: dibujar no lo modifica salvo con operaciones de stencil (PPSSPP `GPUStateUtils`); ZERO/REPLACE escriben 0/ref.
 - La misión usa stencil ALWAYS con ZERO para la geometría normal y REPLACE (ref 255) para luces y neones; un pase de glow reduce la pantalla (con su alfa como máscara) a 128×64 y la suma de vuelta. Escribir el alfa del fragmento convertía el HUD en recuadros blancos.
 
-## 15. Frecuencia de fotogramas  ✅ medido: cambiarla altera el juego
-- Oráculo (PPSSPP, contando cambios de `sceDisplaySetFrameBuf`): el juego original dibuja a **20 fps en las misiones** y 30 en los menús; el port da lo mismo.
-- `0x08879ff8(settings, N)` fija el intervalo: `settings+16` = N (s16), `+12` = 60/N, `+8` = (float)(60/N); el bloque lo apunta `0x09bd2004`. Misiones: N = 3.
-- El bucle principal espera en `0x08837f70` hasta que el contador de vblanks (`s0+4`) alcanza `settings+16`.
-- Medido con el hook del fijador (`ca_hook_frame_interval`) y una sonda por fotograma (`CA_PROBE`; posición del jugador en `view+0/+8`, munición en `0x08f66c88`):
-
-| N | fps | giro | movimiento | recarga (pulsar → munición) |
-|---|---|---|---|---|
-| 3 (original) | 20 | 3,94 rad/2 s | 43 u/s (2,16 por fotograma) | 2,65 s |
-| 2 | 30 | — | 65 u/s (2,16 por fotograma) | 2,60 s |
-| 1 | 60 | 3,88 rad/2 s | 65 u/s (1,08 por fotograma) | 2,55 s |
-
-- El desplazamiento por fotograma está limitado (2,16): a 20 fps el límite fija la velocidad original; con N < 3 el jugador va 1,5 veces más rápido. Además el juego no recupera fotogramas perdidos: con N = 1 cualquier fotograma lento ralentiza el juego. **Por eso el port usa el intervalo original** (`[video] game_frame_rate=0`); 30/60 quedan como opción experimental (con ajuste automático si el PC no llega).
-- Error corregido: la espera de vblank calculaba el siguiente vblank con el periodo truncado (16 683 µs en vez de 16 683,33) y volvía al instante.
-
-## 15b. Cámara suave (rotación tardía)  ✅ verificada contra los fotogramas del juego
-- Entre los fotogramas del juego (20 fps) el front end vuelve a ejecutar el último fotograma grabado con la vista girada por el apuntado que el juego aún no ha mostrado, a la frecuencia del monitor. La lógica no cambia.
-- Cámara = la matriz de vista más usada por los dibujos 3D del fotograma; el arma usa otra y el HUD es 2D, así que no se mueven. Giro: yaw alrededor del eje vertical del mundo por la posición de la cámara (`c = -Rᵀt`), pitch alrededor del eje X de la vista.
-- Delta = (apuntado aplicado por el juego + pendiente) − (aplicado al empezar a dibujar ese fotograma); el pitch pendiente se limita a ±1,309 como el juego. Solo en juego (el hook de la vista se ejecutó hace < 200 ms) y nunca si hay fotogramas reales en cola.
-- Verificación: el fotograma repetido con +0,2 rad de yaw difiere un 2,6 % (RMSE) del que el juego dibuja tras aplicar ese apuntado, frente a un 14,9 % sin girar; pitch +0,15: 1,2 %.
-- Para que cada fotograma grabado sea una imagen completa, los "present" por vblank solo se hacen si el juego lleva 6 vblanks sin cambiar de búfer.
+## 15. Frecuencia de fotogramas  ✅ verificado (velocidad del juego idéntica)
+- Oráculo (PPSSPP, contando cambios de `sceDisplaySetFrameBuf`): el juego original dibuja a **20 fps en las misiones** y 30 en los menús; el port daba lo mismo.
+- `0x08879ff8(settings, N)` fija el intervalo: `settings+16` = N (s16), `+12` = 60/N, `+8` = (float)(60/N); el bloque lo apunta `0x09bd2004`. Llamadas con N = 1, 2 y 3 según la pantalla (misiones: 3).
+- El bucle principal espera en `0x08837f70`: llama a `sceDisplayWaitVblankStartCB` hasta que el contador de vblanks del objeto (`s0+4`) alcanza `settings+16`, y lo pone a 0.
+- La lógica usa esos campos: cambiar solo la espera (o solo `+16`) aceleraba el juego ×2,4 / ×2. Con el hook en el propio fijador (`ca_hook_frame_interval`, N limitado a 1) el giro con el botón mantenido 2 s es 3,88 rad a 60 fps frente a 3,94 rad en el juego original a 20 fps.
+- Como la lógica avanza un paso fijo por fotograma, un PC que no llegue a 60 fps haría ir el juego a cámara lenta (como una PSP que pierde fotogramas). `ca_hook_frame_start` (salida del bucle, `a0` = vblanks que duró el fotograma) sube el intervalo si 6 de 30 fotogramas se pasan; `ca_hook_frame_work_done` (entrada) lo baja tras 180 fotogramas con margen (el plazo se duplica tras cada subida para no oscilar). Nunca supera el intervalo del juego. Verificado con llvmpipe: baja a 30 fps en ~1 s y se mantiene.
+- Error corregido: la espera de vblank calculaba el siguiente vblank con el periodo truncado (16 683 µs en vez de 16 683,33), así que tras unos fotogramas el objetivo ya había pasado y la espera volvía al instante.
 
 ## 16. Audio  ✅ verificado (0 cortes)
 - Antes: las salidas bloqueantes de sceAudio se pacían con el reloj de pared y el front end consumía con el reloj de la tarjeta; la deriva y los retrasos del hilo dejaban la cola vacía → huecos de 1024 muestras (≈4 por minuto, medidos con el driver `disk` de SDL): el sonido "roto".
-- Ahora (modelo de PPSSPP): con un consumidor (`host::g_audioConsumer`), una salida bloqueante espera a que la cola del canal baje de max(objetivo, n) muestras; el callback de audio avisa con `kernel::notifyStateChanged()`. `sceAudioGetChannelRestLength` devuelve lo que queda en la cola. Sin consumidor (runner sin ventana) se mantiene el reloj de pared.
-- Los menús del juego usan el mismo canal (salida bloqueante de la mezcla SAS); su música coincide con PPSSPP (correlación 0,9994).
-- Los cortes que quedaban venían de tirones más largos que el búfer: (1) la contrapresión de la GPU bloqueaba el hilo del juego **sin soltar la CPU invitada** (hasta 200 ms, parando también el hilo de audio): ahora es una espera del kernel (`gpu::throttle`), y los demás hilos siguen; (2) tirones del PC: el objetivo empieza en 2048 muestras, sube 1024 tras cada vaciado (máx. 8192) y baja tras 30 s sin vaciados; tras un vaciado el canal se rellena antes de sonar (un hueco en vez de muchos chasquidos). Con 4 procesos ocupando la CPU: 66 huecos → 1.
+- Ahora (modelo de PPSSPP): con un consumidor (`host::g_audioConsumer`), una salida bloqueante espera a que la cola del canal baje de max(2048, n) muestras; el callback de audio avisa con `kernel::notifyStateChanged()`. `sceAudioGetChannelRestLength` devuelve lo que queda en la cola. Sin consumidor (runner sin ventana) se mantiene el reloj de pared.
 
 ## 17. Teselado de parches
 - Coste medido en la misión: ~13 000 parches por segundo, 300–500 ms/s del hilo del juego (más que todo el código del juego, ~170 ms/s).

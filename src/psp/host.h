@@ -33,8 +33,6 @@ struct AudioChannel {
     uint32_t sampleCount = 0, format = 0; // format 0x00 stereo, 0x10 mono
     int volLeft = 0x8000, volRight = 0x8000;
     std::vector<int16_t> queue;           // interleaved stereo, after volume
-    bool rebuffering = false;             // consumer side: refilling after an underrun
-    bool active = false;                  // consumer side: had data in the last callback
 };
 constexpr int kAudioChannels = 8;
 extern AudioChannel g_audio[kAudioChannels];
@@ -42,8 +40,6 @@ extern std::mutex g_audioMutex;
 // Set by a front end that drains the queues on the sound card's clock; blocking outputs then
 // wait for it (and must be woken with kernel::notifyStateChanged after each drain).
 extern std::atomic<bool> g_audioConsumer;
-// Frames a blocking output keeps queued per channel; the consumer raises it after underruns.
-extern std::atomic<int> g_audioTargetFrames;
 size_t audioQueuedFrames(int ch);
 
 // Direct aim: radians added to the player's yaw/pitch by the game hooks (game_hooks.cpp) the
@@ -52,11 +48,6 @@ struct Aim {
     std::mutex m;
     float yaw = 0, pitch = 0;
     bool enabled = false;
-    // Totals the game has applied (radians, in the hook's sign convention) and when it last
-    // ran; the renderer's late camera rotation uses them (gpu::renderReplay).
-    double appliedYaw = 0, appliedPitch = 0;
-    float gamePitch = 0;     // the view's pitch after the last update
-    uint64_t lastUpdateUs = 0;
 };
 extern Aim g_aim;
 

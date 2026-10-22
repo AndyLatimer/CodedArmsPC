@@ -59,8 +59,7 @@ struct FrontSettings {
     bool stretch = false;
     int widescreen = 1;     // 1: widen the view to the window's aspect (Hor+); 0: original 480x272
     bool pcButtonHints = true; // PC keys in place of the PSP button symbols
-    int frameRate = 0;      // 0 = the game's own (20 fps in missions); 30/60 change the game's speed (experimental)
-    bool lateLatch = true;  // turn the last frame with the mouse at the display's refresh rate
+    int frameRate = 60;     // 60 or 30 (lowered automatically when the PC cannot keep up); 0 = the game's own (20 in missions)
     float volume = 1.0f;
     float deadzone = 0.2f;
     // Mouse look (until the game's camera is driven directly: mapped onto the look buttons).
@@ -107,8 +106,7 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.forceLinearTextures = getF(ini, "video", "force_linear_textures", 0) != 0;
     s.stretch = getF(ini, "video", "stretch", 0) != 0;
     s.widescreen = (int)getF(ini, "video", "widescreen", 1);
-    s.frameRate = (int)getF(ini, "video", "game_frame_rate", 0);
-    s.lateLatch = getF(ini, "video", "smooth_camera", 1) != 0;
+    s.frameRate = (int)getF(ini, "video", "frame_rate", 60);
     s.pcButtonHints = getF(ini, "video", "pc_button_hints", 1) != 0;
     s.volume = getF(ini, "audio", "volume", 1.0f);
     s.deadzone = getF(ini, "input", "deadzone", 0.2f);
@@ -144,8 +142,7 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
     ini.set("video", "force_linear_textures", s.forceLinearTextures ? "1" : "0");
     ini.set("video", "stretch", s.stretch ? "1" : "0");
     ini.set("video", "widescreen", std::to_string(s.widescreen));
-    ini.set("video", "game_frame_rate", std::to_string(s.frameRate));
-    ini.set("video", "smooth_camera", s.lateLatch ? "1" : "0");
+    ini.set("video", "frame_rate", std::to_string(s.frameRate));
     ini.set("video", "pc_button_hints", s.pcButtonHints ? "1" : "0");
     ini.set("audio", "volume", std::to_string(s.volume));
     ini.set("input", "deadzone", std::to_string(s.deadzone));
@@ -312,39 +309,17 @@ std::atomic<int> g_audioUnderruns{0};
 
 // Mixes the game's sceAudio channels. Blocking outputs on the game side wait for these queues
 // to drain (host::g_audioConsumer), so the game is paced by this callback and the queues hold
-// a steady g_audioTargetFrames. If the game falls behind anyway (a hitch longer than the
-// buffer), the channel is refilled before it plays again, so the hitch is one short gap rather
-// than a run of clicks, and the buffer grows for next time.
+// a steady ~2048 frames: enough to ride out scheduling jitter without audible gaps.
 void audioCallback(void*, Uint8* stream, int len) {
-    using namespace psp::host;
     int16_t* out = reinterpret_cast<int16_t*>(stream);
     const int n = len / 2;
     std::vector<int> mix((size_t)n, 0);
     {
-        std::lock_guard<std::mutex> lk(g_audioMutex);
-        // Shrink the buffer again (lower latency) after 30 s without underruns.
-        static int calmFrames = 0, lastUnderruns = 0;
-        const int underruns = g_audioUnderruns.load();
-        calmFrames = underruns != lastUnderruns ? 0 : calmFrames + n / 2;
-        lastUnderruns = underruns;
-        if (calmFrames > 44100 * 30 && g_audioTargetFrames.load() > 2048) {
-            g_audioTargetFrames = g_audioTargetFrames.load() - 1024;
-            calmFrames = 0;
-        }
-        for (auto& ch : g_audio) {
-            if (ch.rebuffering) {
-                if (ch.queue.size() / 2 < (size_t)g_audioTargetFrames.load() / 2 + (size_t)ch.sampleCount && ch.reserved)
-                    continue;
-                ch.rebuffering = false;
-            }
-            const size_t take = std::min<size_t>(ch.queue.size(), (size_t)n);
-            if (take < (size_t)n && ch.active && ch.reserved) { // ran dry while playing
-                g_audioUnderruns++;
-                ch.rebuffering = true;
-                g_audioTargetFrames = std::min(8192, g_audioTargetFrames.load() + 1024);
-            }
-            ch.active = take > 0;
-            if (!take) continue;
+        std::lock_guard<std::mutex> lk(psp::host::g_audioMutex);
+        for (auto& ch : psp::host::g_audio) {
+            if (ch.queue.empty()) continue;
+            size_t take = std::min<size_t>(ch.queue.size(), (size_t)n);
+            if (take < (size_t)n && ch.reserved) g_audioUnderruns++;
             for (size_t i = 0; i < take; ++i) mix[i] += ch.queue[i];
             ch.queue.erase(ch.queue.begin(), ch.queue.begin() + (long)take);
         }
@@ -538,18 +513,12 @@ int main(int argc, char** argv) {
             static Uint64 lastReport = nowTicks;
             if (nowTicks - lastReport >= SDL_GetPerformanceFrequency()) {
                 lastReport = nowTicks;
-                static int reported = 0;
-                const int total = g_audioUnderruns.load();
-                std::fprintf(stderr, "[perf] audio underruns %d buffer %d\n", total - reported,
-                             psp::host::g_audioTargetFrames.load());
-                reported = total;
+                std::fprintf(stderr, "[perf] audio underruns %d\n", g_audioUnderruns.exchange(0));
             }
         }
 
         psp::gpu::PresentInfo p;
         if (psp::gpu::renderPump(p, 4)) { frame = p; haveFrame = true; }
-        // Between the game's frames, the last one is drawn again turned by the newest aim.
-        if (s.lateLatch && haveFrame && psp::gpu::renderReplay(p)) frame = p;
 
         SDL_GL_GetDrawableSize(win, &dw, &dh);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);

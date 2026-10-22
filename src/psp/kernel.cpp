@@ -15,7 +15,6 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <deque>
 #include <map>
 #include <memory>
@@ -144,16 +143,7 @@ static void deliverInterrupts(std::unique_lock<std::mutex>& lk);
 
 // Gives the CPU away. `self` must already be in its new state (Ready/Waiting/Dead).
 // Returns when `self` is scheduled again (or immediately when it is dead).
-static uint64_t g_runStart = 0; // when g_current last started running
-
 static void schedule(std::unique_lock<std::mutex>& lk, Thread* self) {
-    static const bool perf = std::getenv("CA_PERF") != nullptr;
-    if (perf && self && g_runStart) { // debugging: guest threads that keep the CPU for long
-        const uint64_t ran = nowUs() - g_runStart;
-        if (ran > 15000)
-            log("[PERF] thread %d '%s' ran %.1f ms without yielding (ra=%08x)", self->id, self->name.c_str(), ran / 1000.0,
-                self->ctx.r[31]);
-    }
     for (;;) {
         if (g_exit) {
             if (self && self->state != TState::Dead) { // park forever: the process is exiting
@@ -167,7 +157,6 @@ static void schedule(std::unique_lock<std::mutex>& lk, Thread* self) {
         Thread* next = pickNext();
         if (next) {
             g_current = next;
-            g_runStart = nowUs();
             next->state = TState::Running;
             if (next == self) return;
             next->cv.notify_one();
@@ -261,7 +250,6 @@ static std::deque<std::pair<int, uint32_t>> g_pendingIntr;
 struct QueuedCall { uint32_t addr, a0, a1, a2; };
 static std::deque<QueuedCall> g_queuedCalls;
 static std::atomic<bool> g_inInterrupt{false};
-bool inInterrupt() { return g_inInterrupt.load(); }
 
 void queueGuestCall(uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2) {
     std::lock_guard<std::mutex> lk(g_km);
@@ -426,7 +414,7 @@ static void afterHle(Ctx* c) {
 }
 
 // Debugging: CA_HLE_STATS prints the most frequent (import, caller) pairs every second
-// (CA_HLE_STATS=thread: (import, thread id) pairs; any other value: only imports containing it).
+// (CA_HLE_STATS=thread: (import, thread id) pairs).
 static void hleStats(const std::string& name, uint32_t ra) {
     static std::mutex m;
     static std::map<std::pair<std::string, uint32_t>, int> counts;
@@ -453,9 +441,7 @@ extern "C" void hle_call(Ctx* c, int idx) {
     ImportSlot& s = g_imports[(size_t)idx];
     static const bool stats = std::getenv("CA_HLE_STATS") != nullptr;
     static const bool byThread = stats && std::getenv("CA_HLE_STATS")[0] == 't';
-    static const std::string filter = stats && !byThread && std::strcmp(std::getenv("CA_HLE_STATS"), "1") ? std::getenv("CA_HLE_STATS") : "";
-    if (stats && (filter.empty() || s.name.find(filter) != std::string::npos))
-        hleStats(s.name, byThread ? (uint32_t)currentThreadId() : c->r[31]);
+    if (stats) hleStats(s.name, byThread ? (uint32_t)currentThreadId() : c->r[31]);
     if (g_trace)
         log("%s(%08x, %08x, %08x, %08x) thread=%d ra=%08x", s.name.c_str(), c->r[4], c->r[5], c->r[6], c->r[7], currentThreadId(), c->r[31]);
     if (s.fn) {

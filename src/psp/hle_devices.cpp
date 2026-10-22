@@ -19,7 +19,6 @@ Display g_display;
 AudioChannel g_audio[kAudioChannels];
 std::mutex g_audioMutex;
 std::atomic<bool> g_audioConsumer{false};
-std::atomic<int> g_audioTargetFrames{2048};
 size_t audioQueuedFrames(int ch) { return g_audio[ch].queue.size() / 2; }
 } // namespace psp::host
 
@@ -64,7 +63,7 @@ constexpr uint32_t kUmdPresent = 0x02, kUmdReady = 0x10, kUmdReadable = 0x20;
 // buffer would have finished playing on the wall clock, like the hardware DMA.
 uint64_t g_chanBusyUntil[host::kAudioChannels];
 
-size_t queueLimitFrames(uint32_t n) { return std::max<size_t>((size_t)host::g_audioTargetFrames.load(), n); }
+size_t queueLimitFrames(uint32_t n) { return std::max<size_t>(2048, n); }
 
 uint32_t audioOutput(int ch, int volL, int volR, uint32_t buf, bool blocking) {
     using namespace host;
@@ -112,10 +111,7 @@ void registerDeviceHle() {
         g_display.pixelFormat = A(c, 2);
         g_display.frameCount++;
         ret(c, 0);
-        if (gpu::installed() && A(c, 0)) {
-            gpu::setDisplay(A(c, 0), A(c, 1), A(c, 2));
-            gpu::throttle();
-        }
+        if (gpu::installed() && A(c, 0)) gpu::setDisplay(A(c, 0), A(c, 1), A(c, 2));
     });
     registerHle("sceDisplayGetVcount", [](Ctx* c) { ret(c, (uint32_t)vcount()); });
     registerHle("sceDisplayWaitVblankStart", [](Ctx* c) { waitVblank(false); ret(c, 0); });

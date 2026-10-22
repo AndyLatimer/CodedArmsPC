@@ -75,7 +75,6 @@ void wavThread() {
                 ch.queue.erase(ch.queue.begin(), ch.queue.begin() + (long)n);
             }
         }
-        if (g_audioConsumer.load()) psp::kernel::notifyStateChanged();
         for (size_t i = 0; i < mix.size(); ++i) out[i] = (int16_t)std::clamp(mix[i], -32768, 32767);
         std::fwrite(out.data(), 2, out.size(), g_wav);
         g_wavFrames += 441;
@@ -202,9 +201,6 @@ void pressThread(std::vector<Press> presses) {
 float g_aspect = 0;
 std::mutex g_ctlMutex;
 std::vector<std::string> g_ctlShots;
-struct ReplayShot { float yaw, pitch; std::string file; };
-std::vector<ReplayShot> g_ctlReplays; // debug: late camera rotation with an explicit angle
-bool g_lateLatch = false;
 void controlThread(std::string path) {
     for (;;) {
         FILE* f = std::fopen(path.c_str(), "r");
@@ -265,20 +261,6 @@ void controlThread(std::string path) {
                 }
             } else if (c == "skipfbtex") {
                 psp::gpu::setSkipFramebufferTextures(std::atoi(arg) != 0);
-            } else if (c == "replayshot") { // replayshot YAW PITCH FILE
-                ReplayShot r{0, 0, ""};
-                char file[512] = {0};
-                if (std::sscanf(l.c_str(), "%*s %f %f %511s", &r.yaw, &r.pitch, file) == 3) {
-                    r.file = file;
-                    std::lock_guard<std::mutex> lk(g_ctlMutex);
-                    g_ctlReplays.push_back(r);
-                }
-            } else if (c == "latelatch") { // latelatch 0|1: late camera rotation like the front end
-                g_lateLatch = std::atoi(arg) != 0;
-            } else if (c == "replaysigns") {
-                float y = 1, p = 1;
-                std::sscanf(l.c_str(), "%*s %f %f", &y, &p);
-                psp::gpu::setReplaySigns(y, p);
             } else if (c == "interval") { // frame interval cap in vblanks (0 = the game's)
                 psp::host::g_frameInterval = std::atoi(arg);
             } else if (c == "maxdraw") {
@@ -327,22 +309,6 @@ int runWithGl(const psp::kernel::BootOptions& opt, int scale, std::vector<std::p
     for (;;) {
         psp::gpu::PresentInfo p;
         if (psp::gpu::renderPump(p, 5)) { last = p; have = true; ++frames; }
-        if (g_lateLatch && psp::gpu::renderReplay(p)) last = p;
-        std::vector<ReplayShot> replays;
-        {
-            std::lock_guard<std::mutex> lk(g_ctlMutex);
-            replays.swap(g_ctlReplays);
-        }
-        for (const ReplayShot& r : replays) {
-            std::vector<uint32_t> px;
-            int w = 0, h = 0;
-            if (psp::gpu::renderReplayDelta(r.yaw, r.pitch, p) && psp::gpu::readPresented(p, px, w, h)) {
-                stbi_write_png(r.file.c_str(), w, h, 4, px.data(), w * 4);
-                std::fprintf(stderr, "[RUN] replay shot %s (%.3f, %.3f)\n", r.file.c_str(), r.yaw, r.pitch);
-            } else {
-                std::fprintf(stderr, "[RUN] replay shot %s: no frame with a camera\n", r.file.c_str());
-            }
-        }
         double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         {
             std::lock_guard<std::mutex> lk(g_ctlMutex);
@@ -400,12 +366,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--memstick") && i + 1 < argc) psp::kernel::g_hostMsRoot = argv[++i];
         else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) {
             g_wav = std::fopen(argv[++i], "wb");
-            if (g_wav) {
-                writeWavHeader(g_wav, 0);
-                // CA_AUDIO_CONSUMER=1: pace the game by this recorder like the front end's sound card.
-                psp::host::g_audioConsumer = std::getenv("CA_AUDIO_CONSUMER") != nullptr;
-                std::thread(wavThread).detach();
-            }
+            if (g_wav) { writeWavHeader(g_wav, 0); std::thread(wavThread).detach(); }
         }
     }
     if (opt.isoPath.empty()) {
