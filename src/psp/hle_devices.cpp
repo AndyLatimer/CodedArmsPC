@@ -3,6 +3,8 @@
 // utility dialogs in hle_utility.cpp.
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <ctime>
 
 #include "psp/ge.h"
@@ -16,6 +18,7 @@ Controller g_ctrl;
 Display g_display;
 AudioChannel g_audio[kAudioChannels];
 std::mutex g_audioMutex;
+std::atomic<bool> g_audioConsumer{false};
 size_t audioQueuedFrames(int ch) { return g_audio[ch].queue.size() / 2; }
 } // namespace psp::host
 
@@ -27,10 +30,24 @@ constexpr double kVblankUs = 1001000000.0 / 60000.0; // 59.94 Hz
 uint64_t vcount() { return (uint64_t)(nowUs() / kVblankUs); }
 void waitVblank(bool cb) {
     if (cb) runPendingCallbacks();
-    uint64_t next = (vcount() + 1) * (uint64_t)kVblankUs + 1;
+    uint64_t next = (uint64_t)std::ceil((double)(vcount() + 1) * kVblankUs) + 1;
     uint64_t now = nowUs();
     delayCurrentThread(next > now ? next - now : 1, cb);
     if (cb) runPendingCallbacks();
+    static const bool perf = std::getenv("CA_PERF") != nullptr;
+    if (perf) { // time the calling threads spend between vblank waits (frame work)
+        static uint64_t lastReport = 0, busy = 0, waits = 0, maxBusy = 0;
+        static thread_local uint64_t lastReturn = 0;
+        uint64_t t = nowUs();
+        if (lastReturn) { busy += now - lastReturn; maxBusy = std::max(maxBusy, now - lastReturn); }
+        lastReturn = t;
+        ++waits;
+        if (t - lastReport >= 1000000) {
+            std::fprintf(stderr, "[PERF] vblank waits=%llu work=%llums max=%.1fms\n", (unsigned long long)waits,
+                         (unsigned long long)(busy / 1000), maxBusy / 1000.0);
+            lastReport = t; busy = waits = maxBusy = 0;
+        }
+    }
 }
 
 int g_umdCallback = 0;
@@ -39,15 +56,27 @@ int g_umdCallback = 0;
 // which this game does not declare).
 constexpr uint32_t kUmdPresent = 0x02, kUmdReady = 0x10, kUmdReadable = 0x20;
 
-// Audio pacing: a blocking output returns when the previous buffer of the channel would
-// have finished playing, like the hardware DMA.
+// Audio pacing. With a host consumer (the front end's audio device), a blocking output waits
+// until the channel's queue has drained below a threshold, like PPSSPP: the game's audio
+// threads then run on the sound card's clock, so the queue neither underruns (gaps, crackle)
+// nor grows. Without a consumer (headless runs) a blocking output returns when the previous
+// buffer would have finished playing on the wall clock, like the hardware DMA.
 uint64_t g_chanBusyUntil[host::kAudioChannels];
+
+size_t queueLimitFrames(uint32_t n) { return std::max<size_t>(2048, n); }
 
 uint32_t audioOutput(int ch, int volL, int volR, uint32_t buf, bool blocking) {
     using namespace host;
     if (ch < 0 || ch >= kAudioChannels || !g_audio[ch].reserved) return 0x80260003;
     uint32_t n = g_audio[ch].sampleCount;
-    if (blocking) {
+    const bool consumer = g_audioConsumer.load();
+    if (blocking && consumer) {
+        // Time out so a stalled device (e.g. unplugged) cannot hang the game.
+        waitUntil([ch, n] {
+            std::lock_guard<std::mutex> lk(g_audioMutex);
+            return g_audio[ch].queue.size() / 2 <= queueLimitFrames(n);
+        }, 250000);
+    } else if (blocking) {
         uint64_t now = nowUs();
         if (g_chanBusyUntil[ch] > now) delayCurrentThread(g_chanBusyUntil[ch] - now);
     }
@@ -55,7 +84,7 @@ uint32_t audioOutput(int ch, int volL, int volR, uint32_t buf, bool blocking) {
         std::lock_guard<std::mutex> lk(g_audioMutex);
         AudioChannel& a = g_audio[ch];
         bool mono = a.format == 0x10;
-        if (a.queue.size() < 44100 * 2) { // drop if the host is not consuming (headless)
+        if (a.queue.size() < 44100 * 2) { // drop if the host is not consuming
             for (uint32_t i = 0; i < n; ++i) {
                 int16_t l = (int16_t)read16(buf + (mono ? i * 2 : i * 4));
                 int16_t r = mono ? l : (int16_t)read16(buf + i * 4 + 2);
@@ -159,8 +188,14 @@ void registerDeviceHle() {
     registerHle("sceAudioOutputPannedBlocking", [](Ctx* c) { ret(c, audioOutput((int)A(c, 0), (int)A(c, 1), (int)A(c, 2), A(c, 3), true)); });
     registerHle("sceAudioGetChannelRestLength", [](Ctx* c) {
         int ch = (int)A(c, 0);
+        if (ch < 0 || ch >= kAudioChannels) { ret(c, 0x80260003); return; }
+        if (g_audioConsumer.load()) {
+            std::lock_guard<std::mutex> lk(g_audioMutex);
+            ret(c, (uint32_t)(g_audio[ch].queue.size() / 2));
+            return;
+        }
         uint64_t now = nowUs();
-        uint64_t left = ch >= 0 && ch < kAudioChannels && g_chanBusyUntil[ch] > now ? g_chanBusyUntil[ch] - now : 0;
+        uint64_t left = g_chanBusyUntil[ch] > now ? g_chanBusyUntil[ch] - now : 0;
         ret(c, (uint32_t)(left * 44100 / 1000000));
     });
     registerHle("sceAudioSetChannelDataLen", [](Ctx* c) {

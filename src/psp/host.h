@@ -37,6 +37,9 @@ struct AudioChannel {
 constexpr int kAudioChannels = 8;
 extern AudioChannel g_audio[kAudioChannels];
 extern std::mutex g_audioMutex;
+// Set by a front end that drains the queues on the sound card's clock; blocking outputs then
+// wait for it (and must be woken with kernel::notifyStateChanged after each drain).
+extern std::atomic<bool> g_audioConsumer;
 size_t audioQueuedFrames(int ch);
 
 // Direct aim: radians added to the player's yaw/pitch by the game hooks (game_hooks.cpp) the
@@ -47,5 +50,9 @@ struct Aim {
     bool enabled = false;
 };
 extern Aim g_aim;
+
+// Maximum vblanks per rendered frame (1 = 60 fps, 2 = 30 fps); 0 keeps the game's own
+// interval (20 fps in missions). Applied by the frame-interval hook (game_hooks.cpp).
+extern std::atomic<int> g_frameInterval;
 
 } // namespace psp::host
