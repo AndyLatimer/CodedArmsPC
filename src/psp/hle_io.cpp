@@ -319,7 +319,9 @@ void registerIoHle() {
             return;
         }
         struct stat st;
-        if (stat(hostPath(rest).c_str(), &st) != 0) { ret(c, ERR_NOFILE); return; }
+        std::string hp = hostPath(rest);
+        while (hp.size() > 1 && hp.back() == '/') hp.pop_back(); // Windows' stat fails on "dir/"
+        if (stat(hp.c_str(), &st) != 0) { ret(c, ERR_NOFILE); return; }
         fillStat(A(c, 1), (st.st_mode & S_IFDIR) != 0, (uint64_t)st.st_size);
         ret(c, 0);
     });

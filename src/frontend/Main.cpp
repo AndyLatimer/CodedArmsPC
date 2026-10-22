@@ -18,10 +18,12 @@
 #include <vector>
 
 #include "core/Config.h"
+#include "frontend/DialogOverlay.h"
 #include "platform/Input.h"
 #include "psp/gpu/button_glyphs.h"
 #include "psp/gpu/gpu.h"
 #include "psp/host.h"
+#include "psp/host_dialog.h"
 #include "psp/kernel.h"
 #include "render/GL.h"
 
@@ -59,7 +61,7 @@ struct FrontSettings {
     bool stretch = false;
     int widescreen = 1;     // 1: widen the view to the window's aspect (Hor+); 0: original 480x272
     bool pcButtonHints = true; // PC keys in place of the PSP button symbols
-    int frameRate = 60;     // 60 or 30 (lowered automatically when the PC cannot keep up); 0 = the game's own (20 in missions)
+    int frameRate = 60;     // 60 or 30 (fixed per screen); 0 = the game's own (20 fps in missions)
     float volume = 1.0f;
     float deadzone = 0.2f;
     // Mouse look (until the game's camera is driven directly: mapped onto the look buttons).
@@ -347,6 +349,23 @@ const char* kBlitFs =
     "uniform sampler2D uTex;\n"
     "out vec4 fragColor;\n"
     "void main() { fragColor = vec4(texture(uTex, vUV).rgb, 1.0); }\n";
+const char* kOverlayFs =
+    "#version 330 core\n"
+    "in vec2 vUV;\n"
+    "uniform sampler2D uTex;\n"
+    "out vec4 fragColor;\n"
+    "void main() { fragColor = texture(uTex, vUV); }\n";
+
+// Name of the first keyboard/mouse binding, for the dialog key legend.
+std::string keyName(const std::vector<ca::Binding>& list) {
+    for (const ca::Binding& b : list) {
+        if (b.type == ca::Binding::Type::MouseButton) return b.code == 1 ? "Mouse L" : (b.code == 3 ? "Mouse R" : "Mouse");
+        if (b.type != ca::Binding::Type::Key) continue;
+        const std::string n = SDL_GetScancodeName(SDL_Scancode(b.code));
+        return n == "Return" ? "Enter" : n;
+    }
+    return "?";
+}
 
 GLuint makeProgram(const char* vs, const char* fs) {
     auto sh = [](GLenum t, const char* src) {
@@ -426,9 +445,20 @@ int main(int argc, char** argv) {
     if (s.widescreen && dw > 0 && dh > 0 && (float)dw / dh > 480.0f / 272.0f + 0.01f) gs.wideAspect = (float)dw / dh;
     psp::gpu::install(gs);
     if (s.pcButtonHints) installButtonLabels(s);
-    psp::host::g_frameInterval = s.frameRate >= 60 ? 1 : (s.frameRate >= 30 ? 2 : 0);
+    psp::host::g_targetFps = s.frameRate >= 60 ? 60 : (s.frameRate >= 30 ? 30 : 0);
     if (!psp::gpu::renderInit()) return 1;
     GLuint blit = makeProgram(kBlitVs, kBlitFs);
+    GLuint overlayProg = makeProgram(kBlitVs, kOverlayFs);
+    GLuint overlayTex = 0;
+    glGenTextures(1, &overlayTex);
+    glBindTexture(GL_TEXTURE_2D, overlayTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ca::kOverlayW, ca::kOverlayH, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    uint64_t overlaySerial = ~0ull;
+    std::vector<uint32_t> overlayPx;
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);
 
@@ -452,6 +482,9 @@ int main(int argc, char** argv) {
 
     psp::kernel::BootOptions opt;
     opt.isoPath = iso;
+    // The system dialogs (load/save, messages) read the controller like on the PSP and are
+    // drawn by the overlay below.
+    psp::host::setDialogUsesController(true);
     std::thread game([opt] {
         int r = psp::kernel::boot(opt);
         SDL_Event q{};
@@ -519,6 +552,8 @@ int main(int argc, char** argv) {
 
         psp::gpu::PresentInfo p;
         if (psp::gpu::renderPump(p, 4)) { frame = p; haveFrame = true; }
+        // Show the newest frame: frames left queued would make the game wait for the display.
+        while (psp::gpu::renderPump(p, 0)) frame = p;
 
         SDL_GL_GetDrawableSize(win, &dw, &dh);
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -546,6 +581,36 @@ int main(int argc, char** argv) {
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, s.linearOutput ? GL_LINEAR : GL_NEAREST);
             glBindVertexArray(vao);
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        }
+        psp::host::DialogView dialog;
+        if (psp::host::currentDialog(dialog)) {
+            if (dialog.serial != overlaySerial) {
+                const bool cross = dialog.crossConfirms;
+                ca::DialogKeys keys{keyName(s.bindings[cross ? IN_CROSS : IN_CIRCLE]), keyName(s.bindings[cross ? IN_CIRCLE : IN_CROSS]),
+                                    keyName(s.bindings[IN_UP]) + "/" + keyName(s.bindings[IN_DOWN]),
+                                    keyName(s.bindings[IN_LEFT]) + "/" + keyName(s.bindings[IN_RIGHT])};
+                ca::paintDialog(dialog, keys, overlayPx);
+                glBindTexture(GL_TEXTURE_2D, overlayTex);
+                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ca::kOverlayW, ca::kOverlayH, GL_RGBA, GL_UNSIGNED_BYTE, overlayPx.data());
+                overlaySerial = dialog.serial;
+            }
+            // The PSP screen's shape, centred.
+            const float aspect = 480.0f / 272.0f, wa = (float)dw / (float)std::max(dh, 1);
+            float sx = 1, sy = 1;
+            if (wa > aspect) sx = aspect / wa; else sy = wa / aspect;
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(overlayProg);
+            glUniform4f(glGetUniformLocation(overlayProg, "uRect"), -sx, sy, sx, -sy);
+            glUniform2f(glGetUniformLocation(overlayProg, "uUV1"), 1.0f, 1.0f);
+            glUniform1i(glGetUniformLocation(overlayProg, "uTex"), 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, overlayTex);
+            glBindVertexArray(vao);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glDisable(GL_BLEND);
+        } else {
+            overlaySerial = ~0ull;
         }
         SDL_GL_SwapWindow(win);
     }

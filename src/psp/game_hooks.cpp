@@ -8,10 +8,8 @@
 //
 // Frame rate: the game renders a frame every N vblanks. 0x08879ff8(settings, N) is its frame
 // interval setter: it stores N at settings+16, 60/N at +12 and (float)(60/N) at +8 (the block
-// pointed to by 0x09bd2004). The main loop (0x08837f70) waits until N vblanks have passed and
-// the game logic scales its per-frame steps by those fields, so the game speed is the same at
-// any N. Missions use N = 3 (20 fps), menus N = 2, some screens N = 1. The hook caps N to the
-// interval the player chose (1 = 60 fps).
+// pointed to by 0x09bd2004). Missions use N = 3 (20 fps), menus N = 2. The hook lowers N when
+// the setter runs (60 fps: 1, 30 fps: 2).
 
 #include <chrono>
 #include <cmath>
@@ -25,7 +23,7 @@
 
 namespace psp::host {
 Aim g_aim;
-std::atomic<int> g_frameInterval{0};
+std::atomic<int> g_targetFps{0};
 }
 
 namespace {
@@ -34,6 +32,8 @@ void wrf(uint32_t a, float f) { uint32_t v; std::memcpy(&v, &f, 4); psp::write32
 constexpr float kPitchLimit = 1.3090000f; // 0x3FA78D37, the game's own clamp
 constexpr float kPi = 3.14159265f;
 }
+
+uint32_t frameSettingsForTrace();
 
 extern "C" void ca_hook_player_view(Ctx* c) {
     const uint32_t view = c->r[19], input = c->r[18];
@@ -50,7 +50,11 @@ extern "C" void ca_hook_player_view(Ctx* c) {
             last = now;
         }
     }
-    if (trace) std::fprintf(stderr, "[HOOK] view=%08x input=%08x yaw=%f pitch=%f\n", view, input, rdf(view + 0x51C), rdf(view + 0x524));
+    if (trace)
+        std::fprintf(stderr, "[HOOK] view=%08x input=%08x N=%d yaw=%f pitch=%f pos=%f,%f t=%lld\n", view, input,
+                     frameSettingsForTrace() ? (int)(int16_t)psp::read16(frameSettingsForTrace() + 16) : -1, rdf(view + 0x51C),
+                     rdf(view + 0x524), rdf(view), rdf(view + 8),
+                     (long long)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
     std::lock_guard<std::mutex> lk(psp::host::g_aim.m);
     if (!psp::host::g_aim.enabled || (psp::host::g_aim.yaw == 0 && psp::host::g_aim.pitch == 0)) return;
     float yaw = rdf(view + 0x51C) - psp::host::g_aim.yaw; // mouse right turns right: the yaw decreases
@@ -64,78 +68,47 @@ extern "C" void ca_hook_player_view(Ctx* c) {
 
 // Frame rate --------------------------------------------------------------------------------
 namespace {
-constexpr double kVblankMs = 1001.0 / 60.0;
 struct FrameRate {
     uint32_t settings = 0; // the block the setter wrote
     int requested = 0;     // the game's own interval for the current screen
     int effective = 0;     // the interval in use
-    std::chrono::steady_clock::time_point frameStart{};
-    int window = 0, over = 0, fitting = 0;
-    int patience = 180; // frames with headroom before lowering the interval
 } g_fr;
-
-void applyInterval(int n) {
-    g_fr.effective = n;
-    if (!g_fr.settings) return;
-    psp::write16(g_fr.settings + 16, (uint16_t)n);
-    psp::write32(g_fr.settings + 12, (uint32_t)(60 / n));
-    wrf(g_fr.settings + 8, (float)(60 / n));
-}
 } // namespace
+uint32_t frameSettingsForTrace() { return g_fr.settings; }
 
 extern "C" void ca_hook_frame_interval(Ctx* c) {
-    // At 0x08879ff8 (sll v1, a1, 16), the entry of SetFrameInterval(settings, interval).
+    // At 0x08879ff8 (sll v1, a1, 16), the entry of SetFrameInterval(settings, interval). The
+    // interval may only change here: the game derives per-frame steps (e.g. the player's
+    // movement) from it when a screen starts, so changing it afterwards changes the game's
+    // speed (TECHNICAL_NOTES.md section 15).
     g_fr.settings = c->r[4];
     g_fr.requested = (int16_t)c->r[5];
-    g_fr.window = g_fr.over = g_fr.fitting = 0;
-    g_fr.patience = 180;
-    const int cap = psp::host::g_frameInterval.load();
-    if (cap > 0 && g_fr.requested > cap) {
-        c->r[5] = (uint32_t)cap;
-        c->r[3] = (uint32_t)cap << 16;
-        g_fr.effective = cap;
-    } else {
-        g_fr.effective = g_fr.requested;
+    const int fps = psp::host::g_targetFps.load();
+    const int n = fps >= 60 ? 1 : (fps >= 30 ? 2 : 0);
+    g_fr.effective = g_fr.requested;
+    if (n && g_fr.requested > n) {
+        c->r[5] = (uint32_t)n;
+        c->r[3] = (uint32_t)n << 16;
+        g_fr.effective = n;
     }
 }
 
 // The main loop's frame wait (0x08837f70): entry = the frame's work is done, exit = the next
-// frame starts, with a0 = the vblanks the frame took (the counter at s0+4). When frames do
-// not fit in the capped interval (a slow PC), the game would run in slow motion like a PSP
-// dropping frames, because its logic advances a fixed step per frame; so the interval is
-// raised (up to the game's own) and lowered again after a long stretch with headroom.
-extern "C" void ca_hook_frame_work_done(Ctx*) {
-    static const bool perf = std::getenv("CA_PERF") != nullptr;
-    if (perf) {
-        static auto last = std::chrono::steady_clock::now();
-        auto now = std::chrono::steady_clock::now();
-        if (now - last >= std::chrono::seconds(1)) {
-            std::fprintf(stderr, "[PERF] frame interval: game %d, in use %d\n", g_fr.requested, g_fr.effective);
-            last = now;
-        }
-    }
-    const int cap = psp::host::g_frameInterval.load();
-    if (cap <= 0 || !g_fr.settings || g_fr.requested <= cap || g_fr.frameStart.time_since_epoch().count() == 0) return;
-    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - g_fr.frameStart).count();
-    const int n = g_fr.effective;
-    g_fr.fitting = (n > cap && ms < (n - 1) * kVblankMs * 0.7) ? g_fr.fitting + 1 : 0;
-    if (g_fr.fitting >= g_fr.patience) {
-        applyInterval(n - 1);
-        g_fr.fitting = g_fr.window = g_fr.over = 0;
-    }
-}
+// frame starts with a0 = the vblanks the last frame took (the counter at s0+4).
+extern "C" void ca_hook_frame_work_done(Ctx*) {}
 
 extern "C" void ca_hook_frame_start(Ctx* c) {
-    g_fr.frameStart = std::chrono::steady_clock::now();
-    const int cap = psp::host::g_frameInterval.load();
-    if (cap <= 0 || !g_fr.settings || g_fr.requested <= cap) return;
-    const int n = g_fr.effective;
-    g_fr.over += (int)c->r[4] > n;
-    if (++g_fr.window == 30) {
-        if (g_fr.over >= 6 && n < g_fr.requested) {
-            applyInterval(n + 1);
-            g_fr.patience = std::min(g_fr.patience * 2, 3600); // do not oscillate
-        }
-        g_fr.window = g_fr.over = 0;
+    static const bool perf = std::getenv("CA_PERF") != nullptr;
+    if (!perf) return;
+    static auto last = std::chrono::steady_clock::now();
+    static int frames = 0, late = 0;
+    ++frames;
+    late += (int)c->r[4] > g_fr.effective && g_fr.effective > 0;
+    auto now = std::chrono::steady_clock::now();
+    if (now - last >= std::chrono::seconds(1)) {
+        std::fprintf(stderr, "[PERF] game frames %d (late %d), interval: game %d, in use %d\n", frames, late, g_fr.requested,
+                     g_fr.effective);
+        frames = late = 0;
+        last = now;
     }
 }

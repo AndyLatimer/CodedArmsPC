@@ -261,8 +261,8 @@ void controlThread(std::string path) {
                 }
             } else if (c == "skipfbtex") {
                 psp::gpu::setSkipFramebufferTextures(std::atoi(arg) != 0);
-            } else if (c == "interval") { // frame interval cap in vblanks (0 = the game's)
-                psp::host::g_frameInterval = std::atoi(arg);
+            } else if (c == "fps") { // frame rate: 60, 30 or 0 (the game's)
+                psp::host::g_targetFps = std::atoi(arg);
             } else if (c == "maxdraw") {
                 psp::gpu::setMaxDraws(std::atoi(arg));
             } else if (c == "quit") {

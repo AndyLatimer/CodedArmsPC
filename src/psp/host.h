@@ -51,8 +51,8 @@ struct Aim {
 };
 extern Aim g_aim;
 
-// Maximum vblanks per rendered frame (1 = 60 fps, 2 = 30 fps); 0 keeps the game's own
-// interval (20 fps in missions). Applied by the frame-interval hook (game_hooks.cpp).
-extern std::atomic<int> g_frameInterval;
+// Frame rate the game is run at: 60 or 30; 0 keeps the game's own (20 fps in missions).
+// Applied when the game sets its frame interval (game_hooks.cpp).
+extern std::atomic<int> g_targetFps;
 
 } // namespace psp::host

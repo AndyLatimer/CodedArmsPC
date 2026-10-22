@@ -178,6 +178,8 @@ exacta de pieza por celda y los objetos de TIBKLAY quedan pendientes.
 - Formatos KSS (sonido), MOT1, COLL, CLM, WPT, PLT, RLT, C2B, F2B, RLVDEFBIN, RLVSNAP.
 
 ## 9. Savedata y diálogos del sistema (sceUtility)  ✅ verificado contra PPSSPP
+- Front end: los diálogos leen el mando emulado (como PPSSPP: Intro = ✕, Retroceso = ○, flechas = cruceta) y `src/frontend/DialogOverlay.cpp` los dibuja encima del juego (lista de partidas, confirmaciones, mensajes, leyenda de teclas) con una fuente de 8×16 generada de DejaVu Sans Mono (`tools/font/make_font.py`). Sin esto, "Cargar partida" esperaba a un diálogo invisible.
+- Error de Windows corregido: `_stat64` falla con rutas de directorio acabadas en `/` (`memstick/PSP/SAVEDATA/`), así que la lista de partidas salía vacía ("There is no data"). Se quita la barra final (también en `sceIoGetstat`).
 
 Fuente: código del juego (llamadas a `sceUtilitySavedataInitStart` en el BOOT.BIN
 recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
@@ -224,13 +226,22 @@ recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
 - En la PSP el canal alfa del framebuffer es el stencil: dibujar no lo modifica salvo con operaciones de stencil (PPSSPP `GPUStateUtils`); ZERO/REPLACE escriben 0/ref.
 - La misión usa stencil ALWAYS con ZERO para la geometría normal y REPLACE (ref 255) para luces y neones; un pase de glow reduce la pantalla (con su alfa como máscara) a 128×64 y la suma de vuelta. Escribir el alfa del fragmento convertía el HUD en recuadros blancos.
 
-## 15. Frecuencia de fotogramas  ✅ verificado (velocidad del juego idéntica)
-- Oráculo (PPSSPP, contando cambios de `sceDisplaySetFrameBuf`): el juego original dibuja a **20 fps en las misiones** y 30 en los menús; el port daba lo mismo.
-- `0x08879ff8(settings, N)` fija el intervalo: `settings+16` = N (s16), `+12` = 60/N, `+8` = (float)(60/N); el bloque lo apunta `0x09bd2004`. Llamadas con N = 1, 2 y 3 según la pantalla (misiones: 3).
-- El bucle principal espera en `0x08837f70`: llama a `sceDisplayWaitVblankStartCB` hasta que el contador de vblanks del objeto (`s0+4`) alcanza `settings+16`, y lo pone a 0.
-- La lógica usa esos campos: cambiar solo la espera (o solo `+16`) aceleraba el juego ×2,4 / ×2. Con el hook en el propio fijador (`ca_hook_frame_interval`, N limitado a 1) el giro con el botón mantenido 2 s es 3,88 rad a 60 fps frente a 3,94 rad en el juego original a 20 fps.
-- Como la lógica avanza un paso fijo por fotograma, un PC que no llegue a 60 fps haría ir el juego a cámara lenta (como una PSP que pierde fotogramas). `ca_hook_frame_start` (salida del bucle, `a0` = vblanks que duró el fotograma) sube el intervalo si 6 de 30 fotogramas se pasan; `ca_hook_frame_work_done` (entrada) lo baja tras 180 fotogramas con margen (el plazo se duplica tras cada subida para no oscilar). Nunca supera el intervalo del juego. Verificado con llvmpipe: baja a 30 fps en ~1 s y se mantiene.
-- Error corregido: la espera de vblank calculaba el siguiente vblank con el periodo truncado (16 683 µs en vez de 16 683,33), así que tras unos fotogramas el objetivo ya había pasado y la espera volvía al instante.
+## 15. Frecuencia de fotogramas  ✅ medido
+- Oráculo (PPSSPP, contando cambios de `sceDisplaySetFrameBuf`): el juego original dibuja a **20 fps en las misiones** y 30 en los menús; el port da lo mismo.
+- `0x08879ff8(settings, N)` fija el intervalo: `settings+16` = N (s16), `+12` = 60/N, `+8` = (float)(60/N); el bloque lo apunta `0x09bd2004`. Misiones: N = 3.
+- El bucle principal espera en `0x08837f70` hasta que el contador de vblanks (`s0+4`) alcanza `settings+16`. El hilo del jugador (`0x0889e128`, prioridad 0x28) espera un semáforo por fotograma y ejecuta su actualización N veces.
+- **El intervalo solo puede cambiar en el fijador** (`ca_hook_frame_interval`): parte de la lógica deriva su paso del intervalo al empezar la pantalla. Cambiándolo a mitad de nivel, el jugador avanza 1,08 por fotograma tanto con N = 1 como con N = 2 (medido con `CA_HOOK_TRACE`): con N = 2 iría a la mitad de velocidad. La versión que subía el intervalo sobre la marcha cuando el PC no llegaba causaba "movimiento lento a ratos"; se quitó. Por lo mismo **no hay 45 fps** (exigiría alternar 1 y 2 por fotograma; además 1-2 alterno da 40 fps).
+- Medido (entrenamiento, ejecución de la GPU desactivada):
+
+| `frame_rate` | fps | movimiento | giro |
+|---|---|---|---|
+| 0 (original) | 20 | 43 u/s | 2,02 rad/s |
+| 30 | 30 | 65 u/s | 2,02 rad/s |
+| 60 | 60 | 65 u/s | 2,00 rad/s |
+
+  El desplazamiento por fotograma del jugador está limitado (2,16): a 20 fps ese límite fija la velocidad original, así que con 30/60 el jugador va 1,5 veces más rápido que en la PSP. Un fotograma que tarda más que su intervalo va a cámara lenta (el juego no recupera tiempo, como en la PSP).
+- El front end ejecuta todos los fotogramas pendientes en cada refresco y muestra el último, para que un vsync tardío no haga esperar al juego.
+- Error corregido: la espera de vblank calculaba el siguiente vblank con el periodo truncado (16 683 µs en vez de 16 683,33) y volvía al instante.
 
 ## 16. Audio  ✅ verificado (0 cortes)
 - Antes: las salidas bloqueantes de sceAudio se pacían con el reloj de pared y el front end consumía con el reloj de la tarjeta; la deriva y los retrasos del hilo dejaban la cola vacía → huecos de 1024 muestras (≈4 por minuto, medidos con el driver `disk` de SDL): el sonido "roto".

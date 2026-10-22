@@ -71,8 +71,11 @@ struct HostStat {
     time_t atime = 0, mtime = 0, ctime = 0;
 };
 
-HostStat hostStat(const std::string& p) {
+HostStat hostStat(const std::string& path) {
     HostStat s;
+    // Windows' _stat fails on a directory path ending in a separator ("SAVEDATA/").
+    std::string p = path;
+    while (p.size() > 1 && (p.back() == '/' || p.back() == '\\')) p.pop_back();
 #ifdef _WIN32
     struct _stat64 st;
     if (_stat64(p.c_str(), &st) != 0) return s;
