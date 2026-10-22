@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,7 @@
 
 #include "core/Config.h"
 #include "platform/Input.h"
+#include "psp/gpu/button_glyphs.h"
 #include "psp/gpu/gpu.h"
 #include "psp/host.h"
 #include "psp/kernel.h"
@@ -42,7 +44,7 @@ const uint32_t kInputButtons[12] = {
 // left/right = previous/next weapon, R = attack, L = jump, select = pause, start = map.
 const char* kDefaultBindings[IN_COUNT] = {
     "key:Up, mouse:right, pad:dpup", "key:Down, key:R, pad:dpdown", "key:Left, key:Q, mouse:wheeldown, pad:dpleft",
-    "key:Right, key:E, mouse:wheelup, pad:dpright", "key:Return, key:K, pad:a", "key:L, key:Backspace, pad:b",
+    "key:Right, key:E, mouse:wheelup, pad:dpright", "key:Return, key:K, pad:a", "key:Backspace, key:L, pad:b",
     "key:J, pad:x", "key:I, pad:y", "key:Space, pad:leftshoulder, pad:lefttrigger", "mouse:left, pad:rightshoulder, pad:righttrigger",
     "key:M, key:Tab, pad:back", "key:Escape, key:P, pad:start", "key:W", "key:S", "key:A", "key:D"};
 
@@ -56,6 +58,8 @@ struct FrontSettings {
     bool forceLinearTextures = false;
     bool stretch = false;
     int widescreen = 1;     // 1: widen the view to the window's aspect (Hor+); 0: original 480x272
+    bool pcButtonHints = true; // PC keys in place of the PSP button symbols
+    int frameRate = 60;     // 60 or 30 (lowered automatically when the PC cannot keep up); 0 = the game's own (20 in missions)
     float volume = 1.0f;
     float deadzone = 0.2f;
     // Mouse look (until the game's camera is driven directly: mapped onto the look buttons).
@@ -102,6 +106,8 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.forceLinearTextures = getF(ini, "video", "force_linear_textures", 0) != 0;
     s.stretch = getF(ini, "video", "stretch", 0) != 0;
     s.widescreen = (int)getF(ini, "video", "widescreen", 1);
+    s.frameRate = (int)getF(ini, "video", "frame_rate", 60);
+    s.pcButtonHints = getF(ini, "video", "pc_button_hints", 1) != 0;
     s.volume = getF(ini, "audio", "volume", 1.0f);
     s.deadzone = getF(ini, "input", "deadzone", 0.2f);
     s.mouseLookMode = (int)getF(ini, "input", "mouse_look", 1);
@@ -119,6 +125,8 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.invertY = getF(ini, "input", "invert_y", 0) != 0;
     for (int i = 0; i < IN_COUNT; ++i) {
         s.bindingText[i] = ini.get("bindings", kInputNames[i], kDefaultBindings[i]);
+        if (i == IN_CIRCLE && s.bindingText[i] == "key:L, key:Backspace, pad:b") // earlier default: Backspace
+            s.bindingText[i] = kDefaultBindings[i];                               // first for the button hints
         parseList(s.bindingText[i], s.bindings[i]);
     }
 }
@@ -134,6 +142,8 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
     ini.set("video", "force_linear_textures", s.forceLinearTextures ? "1" : "0");
     ini.set("video", "stretch", s.stretch ? "1" : "0");
     ini.set("video", "widescreen", std::to_string(s.widescreen));
+    ini.set("video", "frame_rate", std::to_string(s.frameRate));
+    ini.set("video", "pc_button_hints", s.pcButtonHints ? "1" : "0");
     ini.set("audio", "volume", std::to_string(s.volume));
     ini.set("input", "deadzone", std::to_string(s.deadzone));
     ini.set("input", "mouse_look", std::to_string(s.mouseLookMode));
@@ -247,10 +257,59 @@ void updateController(const FrontSettings& s, InputState& in, bool focused, floa
     psp::host::g_ctrl.ly = (uint8_t)std::clamp((int)std::lround(128 + ay * 127), 0, 255);
 }
 
+// ---- button hints -----------------------------------------------------------------------------
+
+// Short label of the first keyboard/mouse binding of a PSP button, for the keycaps drawn over
+// the game's PSP button symbols (psp/gpu/button_glyphs.h).
+std::string keyLabel(const std::vector<ca::Binding>& list) {
+    using T = ca::Binding::Type;
+    for (const ca::Binding& b : list) {
+        if (b.type == T::MouseButton) {
+            static const char* n[] = {"", "LMB", "MMB", "RMB", "MB4", "MB5"};
+            return b.code >= 1 && b.code <= 5 ? n[b.code] : "";
+        }
+        if (b.type == T::MouseWheelUp) return "WHU";
+        if (b.type == T::MouseWheelDown) return "WHD";
+        if (b.type != T::Key) continue;
+        const std::string name = SDL_GetScancodeName(SDL_Scancode(b.code));
+        static const std::pair<const char*, const char*> kShort[] = {
+            {"Return", "\x01"}, {"Keypad Enter", "\x01"}, {"Up", "\x02"}, {"Down", "\x03"}, {"Left", "\x04"},
+            {"Right", "\x05"}, {"Backspace", "BKS"}, {"Space", "SPC"}, {"Escape", "ESC"}, {"Tab", "TAB"},
+            {"Left Shift", "SHF"}, {"Right Shift", "SHF"}, {"Left Ctrl", "CTL"}, {"Right Ctrl", "CTL"},
+            {"Left Alt", "ALT"}, {"Right Alt", "ALT"}, {"CapsLock", "CAP"}, {"Delete", "DEL"}, {"Insert", "INS"},
+            {"Home", "HOM"}, {"End", "END"}, {"PageUp", "PGU"}, {"PageDown", "PGD"}};
+        for (const auto& [full, label] : kShort)
+            if (name == full) return label;
+        std::string out;
+        for (char c : name)
+            if (std::isalnum((unsigned char)c) && out.size() < 3) out += (char)std::toupper((unsigned char)c);
+        return out;
+    }
+    return "";
+}
+
+void installButtonLabels(const FrontSettings& s) {
+    psp::gpu::ButtonLabels l;
+    l.cross = keyLabel(s.bindings[IN_CROSS]);
+    l.circle = keyLabel(s.bindings[IN_CIRCLE]);
+    l.square = keyLabel(s.bindings[IN_SQUARE]);
+    l.triangle = keyLabel(s.bindings[IN_TRIANGLE]);
+    l.l = keyLabel(s.bindings[IN_L]);
+    l.r = keyLabel(s.bindings[IN_R]);
+    l.start = keyLabel(s.bindings[IN_START]);
+    l.select = keyLabel(s.bindings[IN_SELECT]);
+    psp::gpu::setButtonLabels(l);
+}
+
 // ---- audio --------------------------------------------------------------------------------
 
 std::atomic<float> g_volume{1.0f};
 
+std::atomic<int> g_audioUnderruns{0};
+
+// Mixes the game's sceAudio channels. Blocking outputs on the game side wait for these queues
+// to drain (host::g_audioConsumer), so the game is paced by this callback and the queues hold
+// a steady ~2048 frames: enough to ride out scheduling jitter without audible gaps.
 void audioCallback(void*, Uint8* stream, int len) {
     int16_t* out = reinterpret_cast<int16_t*>(stream);
     const int n = len / 2;
@@ -258,11 +317,14 @@ void audioCallback(void*, Uint8* stream, int len) {
     {
         std::lock_guard<std::mutex> lk(psp::host::g_audioMutex);
         for (auto& ch : psp::host::g_audio) {
+            if (ch.queue.empty()) continue;
             size_t take = std::min<size_t>(ch.queue.size(), (size_t)n);
+            if (take < (size_t)n && ch.reserved) g_audioUnderruns++;
             for (size_t i = 0; i < take; ++i) mix[i] += ch.queue[i];
             ch.queue.erase(ch.queue.begin(), ch.queue.begin() + (long)take);
         }
     }
+    psp::kernel::notifyStateChanged();
     const float v = g_volume.load();
     for (int i = 0; i < n; ++i) out[i] = (int16_t)std::clamp((int)(mix[i] * v), -32768, 32767);
 }
@@ -363,6 +425,8 @@ int main(int argc, char** argv) {
     // Hor+: the PSP's 480x272 is ~16:9; wider windows see more to the sides (set at start-up).
     if (s.widescreen && dw > 0 && dh > 0 && (float)dw / dh > 480.0f / 272.0f + 0.01f) gs.wideAspect = (float)dw / dh;
     psp::gpu::install(gs);
+    if (s.pcButtonHints) installButtonLabels(s);
+    psp::host::g_frameInterval = s.frameRate >= 60 ? 1 : (s.frameRate >= 30 ? 2 : 0);
     if (!psp::gpu::renderInit()) return 1;
     GLuint blit = makeProgram(kBlitVs, kBlitFs);
     GLuint vao = 0;
@@ -377,7 +441,10 @@ int main(int argc, char** argv) {
     want.samples = 1024;
     want.callback = audioCallback;
     SDL_AudioDeviceID audio = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
-    if (audio) SDL_PauseAudioDevice(audio, 0);
+    if (audio) {
+        psp::host::g_audioConsumer = !std::getenv("CA_AUDIO_WALLCLOCK");
+        SDL_PauseAudioDevice(audio, 0);
+    }
 
     InputState in;
     for (int i = 0; i < SDL_NumJoysticks(); ++i)
@@ -395,6 +462,7 @@ int main(int argc, char** argv) {
     game.detach();
 
     SDL_SetRelativeMouseMode(s.mouseLook ? SDL_TRUE : SDL_FALSE);
+    const bool perf = std::getenv("CA_PERF") != nullptr;
     Uint64 lastTicks = SDL_GetPerformanceCounter();
     psp::gpu::PresentInfo frame;
     bool haveFrame = false, running = true, focused = true;
@@ -441,6 +509,13 @@ int main(int argc, char** argv) {
         float dt = std::min(0.1f, (float)(nowTicks - lastTicks) / (float)SDL_GetPerformanceFrequency());
         lastTicks = nowTicks;
         updateController(s, in, focused, dt);
+        if (perf) {
+            static Uint64 lastReport = nowTicks;
+            if (nowTicks - lastReport >= SDL_GetPerformanceFrequency()) {
+                lastReport = nowTicks;
+                std::fprintf(stderr, "[perf] audio underruns %d\n", g_audioUnderruns.exchange(0));
+            }
+        }
 
         psp::gpu::PresentInfo p;
         if (psp::gpu::renderPump(p, 4)) { frame = p; haveFrame = true; }
@@ -474,6 +549,7 @@ int main(int argc, char** argv) {
         }
         SDL_GL_SwapWindow(win);
     }
+    psp::host::g_audioConsumer = false;
     if (audio) SDL_CloseAudioDevice(audio);
     std::_Exit(0);
 }

@@ -217,9 +217,29 @@ recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
 ## 13. Vista del jugador y apuntado con ratón  ✅ verificado
 - Encontrado con el build de vigilancia de escrituras (`-DCA_RECOMP_WATCH`, `CA_WATCH_ADDR`): la función `0x0889ba9c(view, input, ...)` actualiza cada fotograma la vista del jugador (en la misión de entrenamiento `view = 0x08F71570`).
 - `view+0x51C`: yaw (rad), integrado como `yaw -= input[+0x78] × factor` y normalizado; `view+0x524`: pitch (rad), integrado desde `input[+0x79]` y limitado a ±1,309 rad (`0x3FA78D37`, en `0x0889bfb8`); `view+0x14`/`+0x10` reciben copias.
-- La función se llama 4 veces por fotograma con estructuras de entrada distintas; el hook (`game_hooks.cpp`, tras `0x0889bad4`) aplica el giro acumulado una sola vez.
+- La función se ejecuta una vez por paso de lógica (60 por segundo: N veces por fotograma con el intervalo N de §15) con estructuras de entrada que rotan; el hook (`game_hooks.cpp`, tras `0x0889bad4`) aplica el giro acumulado en la primera y lo pone a cero.
 - Esquema A del juego y por qué el ratón ya no emula botones: ver §12.
 
 ## 14. Alfa del framebuffer y glow
 - En la PSP el canal alfa del framebuffer es el stencil: dibujar no lo modifica salvo con operaciones de stencil (PPSSPP `GPUStateUtils`); ZERO/REPLACE escriben 0/ref.
 - La misión usa stencil ALWAYS con ZERO para la geometría normal y REPLACE (ref 255) para luces y neones; un pase de glow reduce la pantalla (con su alfa como máscara) a 128×64 y la suma de vuelta. Escribir el alfa del fragmento convertía el HUD en recuadros blancos.
+
+## 15. Frecuencia de fotogramas  ✅ verificado (velocidad del juego idéntica)
+- Oráculo (PPSSPP, contando cambios de `sceDisplaySetFrameBuf`): el juego original dibuja a **20 fps en las misiones** y 30 en los menús; el port daba lo mismo.
+- `0x08879ff8(settings, N)` fija el intervalo: `settings+16` = N (s16), `+12` = 60/N, `+8` = (float)(60/N); el bloque lo apunta `0x09bd2004`. Llamadas con N = 1, 2 y 3 según la pantalla (misiones: 3).
+- El bucle principal espera en `0x08837f70`: llama a `sceDisplayWaitVblankStartCB` hasta que el contador de vblanks del objeto (`s0+4`) alcanza `settings+16`, y lo pone a 0.
+- La lógica usa esos campos: cambiar solo la espera (o solo `+16`) aceleraba el juego ×2,4 / ×2. Con el hook en el propio fijador (`ca_hook_frame_interval`, N limitado a 1) el giro con el botón mantenido 2 s es 3,88 rad a 60 fps frente a 3,94 rad en el juego original a 20 fps.
+- Como la lógica avanza un paso fijo por fotograma, un PC que no llegue a 60 fps haría ir el juego a cámara lenta (como una PSP que pierde fotogramas). `ca_hook_frame_start` (salida del bucle, `a0` = vblanks que duró el fotograma) sube el intervalo si 6 de 30 fotogramas se pasan; `ca_hook_frame_work_done` (entrada) lo baja tras 180 fotogramas con margen (el plazo se duplica tras cada subida para no oscilar). Nunca supera el intervalo del juego. Verificado con llvmpipe: baja a 30 fps en ~1 s y se mantiene.
+- Error corregido: la espera de vblank calculaba el siguiente vblank con el periodo truncado (16 683 µs en vez de 16 683,33), así que tras unos fotogramas el objetivo ya había pasado y la espera volvía al instante.
+
+## 16. Audio  ✅ verificado (0 cortes)
+- Antes: las salidas bloqueantes de sceAudio se pacían con el reloj de pared y el front end consumía con el reloj de la tarjeta; la deriva y los retrasos del hilo dejaban la cola vacía → huecos de 1024 muestras (≈4 por minuto, medidos con el driver `disk` de SDL): el sonido "roto".
+- Ahora (modelo de PPSSPP): con un consumidor (`host::g_audioConsumer`), una salida bloqueante espera a que la cola del canal baje de max(2048, n) muestras; el callback de audio avisa con `kernel::notifyStateChanged()`. `sceAudioGetChannelRestLength` devuelve lo que queda en la cola. Sin consumidor (runner sin ventana) se mantiene el reloj de pared.
+
+## 17. Teselado de parches
+- Coste medido en la misión: ~13 000 parches por segundo, 300–500 ms/s del hilo del juego (más que todo el código del juego, ~170 ms/s).
+- Caché por hash de los puntos de control decodificados + parámetros (tipo, divisiones, primitiva, orientación, formato): la geometría de los niveles es estática. La malla sale como una sola tira de triángulos (2 vértices por cuadrado + 2 degenerados por fila, conservando el sentido de giro). Resultado: 300 → 80 ms/s y la mitad de vértices.
+
+## 18. Símbolos de los botones
+- El juego dibuja las ayudas de botones desde dos atlas: uno de 256×256 (símbolos ○□×△ de 14×14 en y = 128, x = 0/16/32/48; recuadros L/R de 20×11 en y = 114) y el dibujo de la PSP de 512×512 (círculos de los botones centrados en (211,209) △, (184,236) □, (238,236) ○, (211,262) ×; letras L/R; rótulos SELECT/START en y = 321 con una fuente de 3×5).
+- Se reconocen por un hash de la forma (transparente/oscuro/claro) de esas zonas, no por dirección. Al decodificarlos se repintan los símbolos con la tecla de PC asignada (`psp/gpu/button_glyphs.cpp`, fuente de 3×5 propia). Los textos "× button" de la configuración son de la fuente del juego y no se tocan.
