@@ -196,3 +196,20 @@ recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
   cluster en 32 bits y 16 GB desborda. "No" (opción por defecto) repite la comprobación.
 - Interfaz para el front end: `src/psp/host_dialog.h`; política de respuesta del runner:
   `CA_DIALOG_POLICY` (default/yes/no/cancel/none/buttons), `CA_DIALOG_DELAY_MS`.
+
+## 10. Recompilación estática de BOOT.BIN  ✅ verificado
+- `BOOT.BIN` (ULES-00124) es un PRX ELF en claro, base 0x08804000, compilado con Metrowerks MW MIPS C 2.4.1; reubicaciones de tipo 2/4/5/6.
+- Código: `.text` más inicializadores estáticos dentro de `.data` (0x08a89640–0x08a91714) seguidos de una tabla de 51 constructores.
+- Funciones descubiertas por: destinos de `jal`, punto de entrada, punteros R_MIPS_32 (función si ya es inicio, si se construye con lui/addiu, si está fuera de `.text` o va precedido de `jr ra`; si no, etiqueta de tabla de saltos y entrada secundaria) y saltos que salen de una función (epílogos compartidos de MW → entradas secundarias).
+- Cada función se emite como C sobre `Ctx` (diseño idéntico a `MIPSState` de PPSSPP); `jal` → llamada directa, `jr ra` → retorno, `jr reg` → `switch` sobre las etiquetas de la tabla con `call_indirect` por defecto; importaciones → `hle_call(idx)`; VFPU → `vfpu_exec`.
+- Semánticas verificadas con PPSSPP: `div` INT_MIN/-1 y división por cero, `divu`, NaN canónico en `mul.s`/`sqrt.s`, `div.s` actualiza fcr31.
+
+## 11. Temporización de E/S  ✅ verificado (causa del cuelgue en el cargador de fuentes)
+- Con E/S asíncrona instantánea, un segundo objeto de fuente se enlazaba al primero antes de que éste se inicializara (memcpy con `A.font[164]` sin inicializar).
+- Igual que PPSSPP (IOTIMING_FAST): open UMD 4000 µs, lectura `max(tamaño/100, 100)` µs, seek 100 µs; una operación asíncrona deja el descriptor ocupado (`0x80020329`) hasta que se recoge su resultado; sin operación → `0x8002032A`; los descriptores libres más bajos se reutilizan.
+
+## 12. Renderizador GE  ✅ escenas verificadas visualmente contra PPSSPP
+- Los comandos de la GE se procesan en el hilo del juego: los vértices y texturas se decodifican en el momento (la memoria puede cambiar después) y se graban operaciones GL por fotograma, que el hilo de render ejecuta.
+- Framebuffers: un FBO por dirección de VRAM, a escala N; fila 0 de la PSP = y 0 de GL. Un framebuffer mostrado sin dibujos de la GE se toma de memoria solo si su hash cambió (la GE nunca escribe en la RAM): el juego dibuja en un búfer mientras muestra el otro.
+- Coded Arms construye la geometría de los niveles con parches bezier/spline: sin teselarlos solo se ven el suelo, los objetos y el arma.
+- Esquema de control del juego (tipo A, leído de la pantalla de configuración): stick = mover; △/×/□/○ = mirar arriba/abajo/girar izquierda/derecha; ↑ zoom; ↓ recargar; ←/→ arma anterior/siguiente; R disparar; L saltar; SELECT pausa; START mapa.
