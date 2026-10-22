@@ -1,6 +1,9 @@
 // IoFileMgrForUser: disc0:/ and umd0:/ read from the user's ISO; ms0:/ maps to a host
-// folder (savedata). Asynchronous calls complete immediately; their result is kept for
-// sceIoWaitAsync / sceIoPollAsync.
+// folder (savedata). The data transfer itself happens when a call is made, but completion
+// follows PPSSPP's default ("fast") IO timing: an asynchronous operation keeps the fd busy
+// (SCE_KERNEL_ERROR_ASYNC_BUSY) until it has finished and its result has been collected with
+// sceIoPollAsync / sceIoWaitAsyncCB, and synchronous calls delay the calling thread. Games
+// depend on this: the order in which their loader tasks observe finished reads follows it.
 #include <cstdio>
 #include <map>
 #include <string>
@@ -26,15 +29,24 @@ namespace {
 
 constexpr uint32_t ERR_NOFILE = 0x80010002;
 constexpr uint32_t ERR_BADF = 0x80020323;
-constexpr uint32_t ERR_NO_ASYNC = 0x80020329;
+constexpr uint32_t ERR_ASYNC_BUSY = 0x80020329;
+constexpr uint32_t ERR_NO_ASYNC = 0x8002032A;
+
+// Delays from PPSSPP Core/HLE/sceIo.cpp (IOTIMING_FAST, its default).
+constexpr uint64_t kOpenUmdUs = 4000, kOpenMsUs = 10000, kNotFoundUmdUs = 6000, kSeekUs = 100, kCloseUs = 100;
+uint64_t readDelayUs(uint64_t size) { return std::max<uint64_t>(size / 100, 100); }
 
 struct File {
     bool disc = false;
     uint32_t lba = 0;
     uint64_t size = 0, pos = 0;
     FILE* host = nullptr;
-    bool asyncPending = false;
+    bool asyncPending = false;   // operation in flight until asyncReadyAt
+    bool asyncHasResult = false; // finished, result not collected yet
+    uint64_t asyncReadyAt = 0;
     uint64_t asyncResult = 0;
+    bool closePending = false;
+    bool busy() const { return asyncPending || asyncHasResult; }
     std::string path;
 };
 struct Dir {
@@ -44,7 +56,6 @@ struct Dir {
 
 std::map<int, File> g_files;
 std::map<int, Dir> g_dirs;
-int g_nextFd = 3;
 std::string g_cwd = "disc0:/";
 
 // Splits "disc0:/a/b" into device and path; relative paths use the current directory.
@@ -99,7 +110,9 @@ int openFile(const std::string& path, uint32_t flags) {
     } else {
         return (int)ERR_NOFILE;
     }
-    int fd = g_nextFd++;
+    // The PSP hands out the lowest free descriptor after stdin/stdout/stderr.
+    int fd = 3;
+    while (g_files.count(fd) || g_dirs.count(fd)) ++fd;
     g_files[fd] = f;
     return fd;
 }
@@ -139,52 +152,100 @@ void fillStat(uint32_t addr, bool dir, uint64_t size) {
     write32(addr + 12, (uint32_t)(size >> 32));
 }
 
+// Starts an asynchronous operation on `f` whose result becomes available after `us`.
+void startAsync(File& f, uint64_t result, uint64_t us) {
+    f.asyncPending = true;
+    f.asyncHasResult = false;
+    f.asyncReadyAt = nowUs() + us;
+    f.asyncResult = result;
+}
+
+void closeNow(int fd) {
+    auto it = g_files.find(fd);
+    if (it == g_files.end()) return;
+    if (it->second.host) std::fclose(it->second.host);
+    g_files.erase(it);
+}
+
+// Hands the finished result of `fd` to the guest and frees the fd if it was being closed.
+void collectAsync(int fd, uint32_t out) {
+    File& f = g_files[fd];
+    if (out) { write32(out, (uint32_t)f.asyncResult); write32(out + 4, (uint32_t)(f.asyncResult >> 32)); }
+    f.asyncPending = f.asyncHasResult = false;
+    if (f.closePending) closeNow(fd);
+}
+
+bool isUmd(const std::string& path) {
+    std::string dev, rest;
+    splitPath(path, dev, rest);
+    return dev == "disc0";
+}
+
 } // namespace
 
 void registerIoHle() {
     registerHle("sceIoOpen", [](Ctx* c) {
-        int fd = openFile(readString(A(c, 0)), A(c, 1));
-        log("sceIoOpen(%s, %x) -> %d", readString(A(c, 0)).c_str(), A(c, 1), fd);
+        std::string path = readString(A(c, 0));
+        int fd = openFile(path, A(c, 1));
+        log("sceIoOpen(%s, %x) -> %d", path.c_str(), A(c, 1), fd);
         ret(c, (uint32_t)fd);
+        if (fd >= 0) delayCurrentThread(isUmd(path) ? kOpenUmdUs : kOpenMsUs);
+        else if (isUmd(path)) delayCurrentThread(kNotFoundUmdUs);
+        else delayCurrentThread(kOpenMsUs);
     });
     registerHle("sceIoOpenAsync", [](Ctx* c) {
-        int fd = openFile(readString(A(c, 0)), A(c, 1));
-        log("sceIoOpenAsync(%s) -> %d", readString(A(c, 0)).c_str(), fd);
-        if (fd < 0) { ret(c, (uint32_t)fd); return; }
-        g_files[fd].asyncPending = true;
-        g_files[fd].asyncResult = (uint64_t)fd;
+        std::string path = readString(A(c, 0));
+        int fd = openFile(path, A(c, 1));
+        log("sceIoOpenAsync(%s) -> %d", path.c_str(), fd);
+        if (fd < 0) {
+            // The call still returns an fd; the error is its async result (PPSSPP sceIoOpenAsync).
+            uint32_t err = (uint32_t)fd;
+            fd = 3;
+            while (g_files.count(fd) || g_dirs.count(fd)) ++fd;
+            File& f = g_files[fd];
+            f.path = path;
+            f.closePending = true;
+            startAsync(f, (uint64_t)(int64_t)(int32_t)err, isUmd(path) ? kNotFoundUmdUs : kOpenMsUs);
+        } else {
+            startAsync(g_files[fd], (uint64_t)fd, isUmd(path) ? kOpenUmdUs : kOpenMsUs);
+        }
         ret(c, (uint32_t)fd);
     });
     registerHle("sceIoClose", [](Ctx* c) {
-        auto it = g_files.find((int)A(c, 0));
+        int fd = (int)A(c, 0);
+        auto it = g_files.find(fd);
         if (it == g_files.end()) { ret(c, ERR_BADF); return; }
-        if (it->second.host) std::fclose(it->second.host);
-        g_files.erase(it);
+        if (it->second.asyncPending) { ret(c, ERR_ASYNC_BUSY); return; }
+        closeNow(fd);
         ret(c, 0);
+        delayCurrentThread(kCloseUs);
     });
     registerHle("sceIoCloseAsync", [](Ctx* c) {
         auto it = g_files.find((int)A(c, 0));
         if (it == g_files.end()) { ret(c, ERR_BADF); return; }
-        if (it->second.host) { std::fclose(it->second.host); it->second.host = nullptr; }
-        it->second.asyncPending = true;
-        it->second.asyncResult = 0;
-        it->second.path = "<closing>";
+        if (it->second.busy()) { ret(c, ERR_ASYNC_BUSY); return; }
+        it->second.closePending = true;
+        startAsync(it->second, 0, 0);
         ret(c, 0);
     });
     registerHle("sceIoRead", [](Ctx* c) {
-        int64_t r = readFile((int)A(c, 0), A(c, 1), A(c, 2));
-        log("sceIoRead(%d, %08x, %x) -> %lld", (int)A(c, 0), A(c, 1), A(c, 2), (long long)r);
+        int fd = (int)A(c, 0);
+        auto it = g_files.find(fd);
+        if (it != g_files.end() && it->second.busy()) { ret(c, ERR_ASYNC_BUSY); return; }
+        int64_t r = readFile(fd, A(c, 1), A(c, 2));
+        log("sceIoRead(%d, %08x, %x) -> %lld", fd, A(c, 1), A(c, 2), (long long)r);
         ret(c, (uint32_t)r);
+        if (r >= 0) delayCurrentThread(readDelayUs(A(c, 2)));
     });
     registerHle("sceIoReadAsync", [](Ctx* c) {
         int fd = (int)A(c, 0);
-        uint64_t pos = g_files.count(fd) ? g_files[fd].pos : 0;
-        int64_t r = readFile(fd, A(c, 1), A(c, 2));
-        log("sceIoReadAsync(%d @%llu, %08x, %x) -> %lld", fd, (unsigned long long)pos, A(c, 1), A(c, 2), (long long)r);
         auto it = g_files.find(fd);
         if (it == g_files.end()) { ret(c, ERR_BADF); return; }
-        it->second.asyncPending = true;
-        it->second.asyncResult = (uint64_t)r;
+        if (it->second.busy()) { ret(c, ERR_ASYNC_BUSY); return; }
+        uint64_t pos = it->second.pos;
+        int64_t r = readFile(fd, A(c, 1), A(c, 2));
+        log("sceIoReadAsync(%d @%llu, %08x, %x) -> %lld", fd, (unsigned long long)pos, A(c, 1), A(c, 2), (long long)r);
+        startAsync(it->second, (uint64_t)r, readDelayUs(A(c, 2)));
         ret(c, 0);
     });
     registerHle("sceIoWrite", [](Ctx* c) {
@@ -206,35 +267,47 @@ void registerIoHle() {
     });
     registerHle("sceIoLseek", [](Ctx* c) {
         // fd in a0, 64-bit offset in a2:a3 (aligned register pair), whence in t0
+        int fd = (int)A(c, 0);
+        auto it = g_files.find(fd);
+        if (it != g_files.end() && it->second.busy()) { ret64(c, (uint64_t)(int64_t)(int32_t)ERR_ASYNC_BUSY); return; }
         int64_t off = (int64_t)(((uint64_t)A(c, 3) << 32) | A(c, 2));
-        int64_t r = seekFile((int)A(c, 0), off, (int)A(c, 4));
-        log("sceIoLseek(%d, %lld, %d) -> %lld", (int)A(c, 0), (long long)off, (int)A(c, 4), (long long)r);
+        int64_t r = seekFile(fd, off, (int)A(c, 4));
+        log("sceIoLseek(%d, %lld, %d) -> %lld", fd, (long long)off, (int)A(c, 4), (long long)r);
         ret64(c, (uint64_t)r);
     });
     registerHle("sceIoLseekAsync", [](Ctx* c) {
         int fd = (int)A(c, 0);
+        auto it = g_files.find(fd);
+        if (it == g_files.end()) { ret(c, ERR_BADF); return; }
+        if (it->second.busy()) { ret(c, ERR_ASYNC_BUSY); return; }
         int64_t off = (int64_t)(((uint64_t)A(c, 3) << 32) | A(c, 2));
         int64_t r = seekFile(fd, off, (int)A(c, 4));
         log("sceIoLseekAsync(%d, %lld, %d) -> %lld", fd, (long long)off, (int)A(c, 4), (long long)r);
-        auto it = g_files.find(fd);
-        if (it == g_files.end()) { ret(c, ERR_BADF); return; }
-        it->second.asyncPending = true;
-        it->second.asyncResult = (uint64_t)r;
+        startAsync(it->second, (uint64_t)r, kSeekUs);
         ret(c, 0);
     });
-    auto waitAsync = [](Ctx* c) {
+    registerHle("sceIoPollAsync", [](Ctx* c) {
+        int fd = (int)A(c, 0);
+        auto it = g_files.find(fd);
+        if (it == g_files.end()) { ret(c, ERR_BADF); return; }
+        File& f = it->second;
+        if (!f.busy()) { ret(c, ERR_NO_ASYNC); return; }
+        if (f.asyncPending && nowUs() < f.asyncReadyAt) { ret(c, 1); return; } // not ready
+        collectAsync(fd, A(c, 1));
+        ret(c, 0);
+    });
+    registerHle("sceIoWaitAsyncCB", [](Ctx* c) {
         int fd = (int)A(c, 0);
         uint32_t out = A(c, 1);
         auto it = g_files.find(fd);
         if (it == g_files.end()) { ret(c, ERR_BADF); return; }
-        if (!it->second.asyncPending) { ret(c, ERR_NO_ASYNC); return; }
-        if (out) { write32(out, (uint32_t)it->second.asyncResult); write32(out + 4, (uint32_t)(it->second.asyncResult >> 32)); }
-        it->second.asyncPending = false;
-        if (it->second.path == "<closing>") g_files.erase(it);
+        if (!it->second.busy()) { ret(c, ERR_NO_ASYNC); runPendingCallbacks(); return; }
+        uint64_t now = nowUs(), readyAt = it->second.asyncReadyAt;
         ret(c, 0);
-    };
-    registerHle("sceIoWaitAsyncCB", waitAsync);
-    registerHle("sceIoPollAsync", waitAsync);
+        if (it->second.asyncPending && now < readyAt) delayCurrentThread(readyAt - now, true);
+        else runPendingCallbacks();
+        if (g_files.count(fd) && g_files[fd].busy()) collectAsync(fd, out);
+    });
     registerHle("sceIoGetstat", [](Ctx* c) {
         std::string dev, rest;
         splitPath(readString(A(c, 0)), dev, rest);
@@ -255,7 +328,8 @@ void registerIoHle() {
         splitPath(readString(A(c, 0)), dev, rest);
         Dir d;
         if (dev != "disc0" || !iso().listDir(rest, d.entries)) { ret(c, ERR_NOFILE); return; }
-        int fd = g_nextFd++;
+        int fd = 3;
+        while (g_files.count(fd) || g_dirs.count(fd)) ++fd;
         g_dirs[fd] = d;
         ret(c, (uint32_t)fd);
     });
