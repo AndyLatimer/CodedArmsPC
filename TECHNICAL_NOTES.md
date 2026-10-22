@@ -176,3 +176,23 @@ exacta de pieza por celda y los objetos de TIBKLAY quedan pendientes.
 - Velocidad de movimiento, salto, gravedad, FOV originales (valores del port provisionales).
 - Uso del alfa del color de vértice (algunos vértices tienen A = 0).
 - Formatos KSS (sonido), MOT1, COLL, CLM, WPT, PLT, RLT, C2B, F2B, RLVDEFBIN, RLVSNAP.
+
+## 9. Savedata y diálogos del sistema (sceUtility)  ✅ verificado contra PPSSPP
+
+Fuente: código del juego (llamadas a `sceUtilitySavedataInitStart` en el BOOT.BIN
+recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
+
+- Petición de savedata de **1500 bytes** (formato V2, sin `secureVersion`/clave) → PPSSPP
+  cifra con **modo 1** (sin clave del juego); hash de PARAM.SFO con modos 2 y 1
+  (`SAVEDATA_PARAMS[0] = 0x01`). gameName `ULES00124`, saveName `000`..`004`, fichero `CODED.ARM`.
+- Modos que usa el juego (análisis estático): 8 SIZES (en el arranque), 0 AUTOLOAD, 2 LOAD,
+  4 LISTLOAD, 1 AUTOSAVE, 3 SAVE, 6 LISTDELETE, 7 LISTALLDELETE. No importa
+  `sceUtilityNetconfInitStart`.
+- Arranque: SIZES (usedSpaceKB 64, 2 clusters, igual que PPSSPP) y después un MsgDialog V2
+  (580 bytes, opciones YESNO|DEFAULT_NO): *"There is insufficient space on the Memory Stick
+  Duo™. At least 160 KB is needed..."*. **PPSSPP lo muestra también** con su tarjeta por
+  defecto de 16 GB; con 1 GB (`MemStickSize = 1`) no aparece ni en PPSSPP ni aquí
+  (`CA_MEMSTICK_SIZE_GB=1`). Hipótesis: el juego multiplica clusters libres × tamaño de
+  cluster en 32 bits y 16 GB desborda. "No" (opción por defecto) repite la comprobación.
+- Interfaz para el front end: `src/psp/host_dialog.h`; política de respuesta del runner:
+  `CA_DIALOG_POLICY` (default/yes/no/cancel/none/buttons), `CA_DIALOG_DELAY_MS`.

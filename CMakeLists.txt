@@ -88,6 +88,16 @@ add_library(ca_psp OBJECT
   src/render/GL.cpp
   src/psp/ppsspp/InterpreterVFPU.cpp
   src/psp/ppsspp/MIPSVFPUUtils.cpp
+  # sceUtility savedata / message dialogs (PPSSPP port) and the host dialog interface
+  src/psp/hle_utility.cpp
+  src/psp/host_dialog.cpp
+  src/psp/ppsspp/ppsspp_utility_compat.cpp
+  src/psp/ppsspp/PSPDialog.cpp
+  src/psp/ppsspp/PSPMsgDialog.cpp
+  src/psp/ppsspp/PSPSaveDialog.cpp
+  src/psp/ppsspp/SavedataParam.cpp
+  src/psp/ppsspp/ParamSFO.cpp
+  src/psp/ppsspp/sceChnnlsv.cpp
 )
 target_include_directories(ca_psp PUBLIC src src/psp/ppsspp)
 target_include_directories(ca_psp SYSTEM PRIVATE third_party/stb)
@@ -131,6 +141,29 @@ target_sources(ca_psp PRIVATE
 target_include_directories(ca_psp SYSTEM PRIVATE ${CA_FFMPEG_DIR}/include)
 target_compile_definitions(ca_psp PRIVATE USE_FFMPEG)
 
+# KIRK crypto engine from PPSSPP's ext/libkirk (savedata encryption), see third_party/libkirk.
+add_library(ca_kirk OBJECT third_party/libkirk/kirk_engine.c third_party/libkirk/AES.c
+  third_party/libkirk/SHA1.c third_party/libkirk/bn.c third_party/libkirk/ec.c)
+if(NOT MSVC)
+  target_compile_options(ca_kirk PRIVATE -w)
+endif()
+target_include_directories(ca_psp PUBLIC third_party/libkirk)
+
+# ---- Savedata tests (no game image needed). With -DCA_PPSSPP_DIR=<PPSSPP checkout> the test
+# also checks the encryption and hashes against PPSSPP's own sceChnnlsv.cpp.
+set(CA_PPSSPP_DIR "" CACHE PATH "Optional PPSSPP source checkout used as reference by test_savedata")
+add_executable(test_savedata tests/savedata/test_savedata.cpp src/psp/memory.cpp src/psp/host_dialog.cpp
+  src/psp/ppsspp/ppsspp_utility_compat.cpp src/psp/ppsspp/PSPDialog.cpp src/psp/ppsspp/SavedataParam.cpp
+  src/psp/ppsspp/ParamSFO.cpp src/psp/ppsspp/sceChnnlsv.cpp $<TARGET_OBJECTS:ca_kirk>)
+target_include_directories(test_savedata PRIVATE src src/psp/ppsspp third_party/libkirk)
+if(CA_PPSSPP_DIR)
+  target_sources(test_savedata PRIVATE tests/savedata/ref_chnnlsv.cpp)
+  set_source_files_properties(tests/savedata/ref_chnnlsv.cpp PROPERTIES
+    INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/tests/savedata/refstub;${CA_PPSSPP_DIR}")
+  target_compile_definitions(test_savedata PRIVATE CA_HAVE_PPSSPP_REF=1)
+endif()
+add_test(NAME savedata COMMAND test_savedata ${CMAKE_BINARY_DIR}/savedata_test_ms)
+
 if(CA_GAME_ISO)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
   set(CA_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
@@ -149,7 +182,7 @@ if(CA_GAME_ISO)
   endif()
 
   # The game: recompiled code + HLE runtime + native front end.
-  add_executable(CodedArms WIN32 src/frontend/Main.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_guest>)
+  add_executable(CodedArms WIN32 src/frontend/Main.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
   target_include_directories(CodedArms PRIVATE src)
   if(TARGET SDL2::SDL2main)
     target_link_libraries(CodedArms PRIVATE SDL2::SDL2main)
@@ -159,7 +192,7 @@ if(CA_GAME_ISO)
     target_link_options(CodedArms PRIVATE -static-libgcc -static-libstdc++ -static)
   endif()
 
-  add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_guest>)
+  add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
   target_include_directories(ca_psprun PRIVATE src)
   target_link_libraries(ca_psprun PRIVATE ca_at3 ca_ffmpeg Threads::Threads SDL2::SDL2)
   target_include_directories(ca_psprun SYSTEM PRIVATE third_party/stb)

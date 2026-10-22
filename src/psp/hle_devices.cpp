@@ -1,6 +1,6 @@
-// Device HLE: display, controller, GE front end, audio, utility dialogs, UMD, power,
-// impose, RTC. Network (ad hoc multiplayer) is reported unavailable for now; MPEG video is in
-// hle_mpeg.cpp.
+// Device HLE: display, controller, GE front end, audio, UMD, power, impose, RTC. Network
+// (ad hoc multiplayer) is reported unavailable for now; MPEG video is in hle_mpeg.cpp and the
+// utility dialogs in hle_utility.cpp.
 #include <chrono>
 #include <cmath>
 #include <ctime>
@@ -38,22 +38,6 @@ int g_umdCallback = 0;
 // notification carries PRESENT|READABLE (READY only for modules with a compiled SDK version,
 // which this game does not declare).
 constexpr uint32_t kUmdPresent = 0x02, kUmdReady = 0x10, kUmdReadable = 0x20;
-
-// Utility dialogs share one simple state machine: 0 none, 1 init, 2 visible, 3 quit, 4 finished.
-struct Dialog {
-    int status = 0;
-    uint32_t params = 0;
-};
-Dialog g_savedata, g_msg, g_netconf;
-
-void dialogInit(Dialog& d, uint32_t params) { d.status = 2; d.params = params; }
-void dialogShutdown(Dialog& d) { d.status = 0; }
-void dialogUpdate(Dialog& d) { if (d.status == 2) d.status = 3; }
-uint32_t dialogStatus(Dialog& d) {
-    uint32_t s = (uint32_t)d.status;
-    if (d.status == 4) d.status = 0;
-    return s;
-}
 
 // Audio pacing: a blocking output returns when the previous buffer of the channel would
 // have finished playing, like the hardware DMA.
@@ -191,42 +175,7 @@ void registerDeviceHle() {
     });
     registerHle("sceAudioChangeChannelVolume", [](Ctx* c) { ret(c, 0); });
 
-    // ---- sceUtility
-    registerHle("sceUtilitySavedataInitStart", [](Ctx* c) {
-        uint32_t p = A(c, 0);
-        log("SavedataInitStart mode=%u", read32(p + 48));
-        // Report "no save data" (result field at +28); saving is implemented later.
-        write32(p + 28, 0x80110307);
-        dialogInit(g_savedata, p);
-        ret(c, 0);
-    });
-    registerHle("sceUtilitySavedataShutdownStart", [](Ctx* c) { g_savedata.status = 4; ret(c, 0); });
-    registerHle("sceUtilitySavedataUpdate", [](Ctx* c) { dialogUpdate(g_savedata); ret(c, 0); });
-    registerHle("sceUtilitySavedataGetStatus", [](Ctx* c) { ret(c, dialogStatus(g_savedata)); });
-    registerHle("sceUtilityMsgDialogInitStart", [](Ctx* c) {
-        uint32_t p = A(c, 0);
-        log("MsgDialog: %s", readString(p + 0x30 + 0x10, 512).c_str());
-        dialogInit(g_msg, p);
-        ret(c, 0);
-    });
-    registerHle("sceUtilityMsgDialogShutdownStart", [](Ctx* c) { g_msg.status = 4; ret(c, 0); });
-    registerHle("sceUtilityMsgDialogUpdate", [](Ctx* c) { dialogUpdate(g_msg); ret(c, 0); });
-    registerHle("sceUtilityMsgDialogGetStatus", [](Ctx* c) { ret(c, dialogStatus(g_msg)); });
-    registerHle("sceUtilityNetconfShutdownStart", [](Ctx* c) { g_netconf.status = 4; ret(c, 0); });
-    registerHle("sceUtilityNetconfUpdate", [](Ctx* c) { dialogUpdate(g_netconf); ret(c, 0); });
-    registerHle("sceUtilityNetconfGetStatus", [](Ctx* c) { ret(c, dialogStatus(g_netconf)); });
-    registerHle("sceUtilityGetSystemParamInt", [](Ctx* c) {
-        uint32_t id = A(c, 0), out = A(c, 1);
-        uint32_t v = 0;
-        switch (id) {
-        case 8: v = 1; break; // language: English
-        case 9: v = 1; break; // confirm button: cross
-        case 2: v = 0; break; // adhoc channel auto
-        default: v = 0; break;
-        }
-        write32(out, v);
-        ret(c, 0);
-    });
+    // ---- sceUtility: see hle_utility.cpp
 
     // ---- sceUmdUser
     registerHle("sceUmdCheckMedium", [](Ctx* c) { ret(c, 1); });

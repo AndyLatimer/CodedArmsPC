@@ -58,6 +58,13 @@ void delayCurrentThread(uint64_t us, bool processCallbacks = false);
 // Wakes threads blocked in waitUntil so they re-check their condition (e.g. after an
 // object changed state, or from a host thread such as audio/vblank).
 void notifyStateChanged();
+// HLE helper threads (PPSSPP HLEHelperThread): scheduled like guest threads, run host code.
+int startHostThread(const std::string& name, int priority, std::function<void()> body);
+bool threadStopped(int id);
+void terminateThread(int id);
+int currentThreadPriority();
+void changeCurrentThreadPriority(int priority); // also reschedules (back of the new queue)
+void eatUs(uint64_t us);                          // keep the CPU busy for `us`
 void yieldIfHigherPriorityReady();
 
 // Interrupts: guest handlers run on the calling thread at HLE boundaries.
