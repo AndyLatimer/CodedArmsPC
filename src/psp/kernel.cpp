@@ -82,6 +82,7 @@ struct Thread {
     bool processCallbacks = false;
     int exitStatus = 0;
     int wakeupCount = 0;
+    std::function<void()> hostBody; // HLE helper thread: runs host code instead of guest code
 };
 
 static std::mutex g_km;
@@ -439,6 +440,11 @@ static void threadMain(Thread* t) {
         t->cv.wait(lk, [t] { return (g_current == t && t->state == TState::Running) || g_exit; });
         if (g_exit) return;
     }
+    if (t->hostBody) {
+        t->hostBody();
+        exitThread(t, 0, false);
+        return;
+    }
     call_indirect(&t->ctx, t->entry);
     exitThread(t, (int)t->ctx.r[2], false);
 }
@@ -459,6 +465,7 @@ static void exitThread(Thread* t, int status, bool deleteIt) {
     t_self->cv.wait(lk, [] { return false; });
     std::abort();
 }
+
 
 static Thread* findThread(int id) {
     if (id == 0) return t_self;
@@ -504,6 +511,68 @@ static void startThread(Thread* t, uint32_t argSize, uint32_t argp) {
     makeReady(t);
     t->host = std::thread(threadMain, t);
     t->host.detach();
+}
+
+// ---- HLE helper threads -----------------------------------------------------------------
+// Like PPSSPP's HLEHelperThread: a kernel thread (attr KERNEL, so no user-memory stack) that is
+// scheduled like any guest thread but runs host code. Started with a normal reschedule.
+int startHostThread(const std::string& name, int priority, std::function<void()> body) {
+    int id;
+    {
+        std::lock_guard<std::mutex> lk(g_km);
+        auto t = std::make_unique<Thread>();
+        t->id = newUid();
+        t->name = name;
+        t->priority = priority;
+        t->attr = 0x00001000;
+        t->hostBody = std::move(body);
+        Thread* raw = t.get();
+        g_threads[raw->id] = std::move(t);
+        raw->ctx.mem = g_mem;
+        raw->ctx.thread = raw;
+        makeReady(raw);
+        raw->host = std::thread(threadMain, raw);
+        raw->host.detach();
+        id = raw->id;
+    }
+    yieldIfHigherPriorityReady();
+    return id;
+}
+
+bool threadStopped(int id) {
+    std::lock_guard<std::mutex> lk(g_km);
+    auto it = g_threads.find(id);
+    return it == g_threads.end() || it->second->state == TState::Dead || it->second->state == TState::Dormant;
+}
+
+void terminateThread(int id) {
+    std::lock_guard<std::mutex> lk(g_km);
+    auto it = g_threads.find(id);
+    if (it == g_threads.end()) return;
+    it->second->state = TState::Dead; // its host thread stays parked, never scheduled again
+    it->second->waitCond = nullptr;
+    g_idleCv.notify_all();
+}
+
+int currentThreadPriority() {
+    std::lock_guard<std::mutex> lk(g_km);
+    return t_self ? t_self->priority : 0;
+}
+
+// sceKernelChangeThreadPriority on the current thread: it goes to the back of its new
+// priority's ready queue, so an equal-priority thread that was waiting gets the CPU first.
+void changeCurrentThreadPriority(int priority) {
+    std::unique_lock<std::mutex> lk(g_km);
+    Thread* self = t_self;
+    self->priority = priority;
+    makeReady(self);
+    schedule(lk, self);
+}
+
+// hleEatMicro/hleEatCycles: the current thread keeps the CPU for this long.
+void eatUs(uint64_t us) {
+    uint64_t until = nowUs() + us;
+    while (nowUs() < until) std::this_thread::yield();
 }
 
 // ---- semaphores / event flags ----------------------------------------------------------
@@ -916,9 +985,11 @@ static void registerCoreHle() {
     extern void registerIoHle();
     extern void registerDeviceHle();
     extern void registerSasHle();
+    extern void registerUtilityHle();
     registerIoHle();
     registerDeviceHle();
     registerSasHle();
+    registerUtilityHle();
 }
 
 } // namespace psp::kernel

@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: only the savedata crypto the utility uses internally (the game does
+// not import sceChnnlsv or semaphore); __ChnnlsvInit replaces Register_sceChnnlsv.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,7 +19,8 @@
 
 #pragma once
 
-#include "ext/libkirk/kirk_engine.h"
+#include "ppsspp_utility_compat.h"
+#include "kirk_engine.h"
 
 typedef struct _pspChnnlsvContext1 {
 	/** Cipher mode */
@@ -45,6 +48,5 @@ int sceSdMacFinal(pspChnnlsvContext1& ctx, u8* in_hash, const u8* in_key);
 
 KirkState *__ChnnlsvKirkState();
 
-// deceptively named.
-void Register_sceChnnlsv();
-void Register_semaphore();
+// Initialises the KIRK engine state (Register_sceChnnlsv in PPSSPP).
+void __ChnnlsvInit();

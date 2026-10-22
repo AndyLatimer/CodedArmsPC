@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: save states, on-screen notices (OSD) and memory-tag bookkeeping
+// removed; files through the ms0:/ stand-in of ppsspp_utility_compat; icons as PNG bytes.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,26 +19,11 @@
 
 #include <algorithm>
 #include <memory>
-#include "Common/Log.h"
-#include "Common/Data/Text/I18n.h"
-#include "Common/Serialize/Serializer.h"
-#include "Common/Serialize/SerializeFuncs.h"
-#include "Common/System/OSD.h"
-#include "Common/StringUtils.h"
-#include "Core/Config.h"
-#include "Core/Reporting.h"
-#include "Core/System.h"
-#include "Core/Debugger/MemBlockInfo.h"
-#include "Core/Dialog/SavedataParam.h"
-#include "Core/Dialog/PSPSaveDialog.h"
-#include "Core/FileSystems/MetaFileSystem.h"
-#include "Core/Util/PathUtil.h"
-#include "Core/HLE/sceIo.h"
-#include "Core/HLE/sceKernelMemory.h"
-#include "Core/HLE/sceChnnlsv.h"
-#include "Core/ELF/ParamSFO.h"
-#include "Core/HW/MemoryStick.h"
-#include "Core/Util/PPGeDraw.h"
+#include <mutex>
+
+#include "SavedataParam.h"
+#include "PSPSaveDialog.h"
+#include "sceChnnlsv.h"
 
 static const std::string ICON0_FILENAME = "ICON0.PNG";
 static const std::string ICON1_FILENAME = "ICON1.PMF";
@@ -164,69 +151,11 @@ namespace
 	};
 }
 
-void SaveFileInfo::DoState(PointerWrap &p)
-{
-	auto s = p.Section("SaveFileInfo", 1, 3);
-	if (!s)
-		return;
-
-	Do(p, size);
-	Do(p, saveName);
-	Do(p, idx);
-
-	DoCString(p, title);
-	DoCString(p, saveTitle);
-	DoCString(p, saveDetail);
-
-	Do(p, modif_time);
-	if (s >= 3) {
-		// The delete dialogs delete by it, and for LISTALLDELETE it isn't the game name and save name.
-		Do(p, saveDir);
-		Do(p, broken);
-	}
-
-	if (s <= 1) {
-		u32 textureData;
-		int textureWidth;
-		int textureHeight;
-		Do(p, textureData);
-		Do(p, textureWidth);
-		Do(p, textureHeight);
-
-		if (textureData != 0) {
-			// Must be MODE_READ.
-			texture = new PPGeImage("");
-			texture->CompatLoad(textureData, textureWidth, textureHeight);
-		}
-	} else {
-		bool hasTexture = texture != NULL;
-		Do(p, hasTexture);
-		if (hasTexture) {
-			if (p.mode == p.MODE_READ) {
-				delete texture;
-				texture = new PPGeImage("");
-			}
-			if (texture) {
-				texture->DoState(p);
-			}
-		}
-	}
-}
-
 SavedataParam::SavedataParam() { }
 
 void SavedataParam::Init() {
 	// If the folder already exists, this is a no-op.
 	pspFileSystem.MkDir(savePath);
-	// Create a nomedia file to hide save icons form Android image viewer
-#if PPSSPP_PLATFORM(ANDROID)
-	int handle = pspFileSystem.OpenFile(savePath + ".nomedia", (FileAccess)(FILEACCESS_CREATE | FILEACCESS_WRITE), 0);
-	if (handle >= 0) {
-		pspFileSystem.CloseFile(handle);
-	} else {
-		INFO_LOG(Log::IO, "Failed to create .nomedia file (might be ok if it already exists)");
-	}
-#endif
 }
 
 std::string SavedataParam::GetSaveDirName(const SceUtilitySavedataParam *param, int saveId) const
@@ -447,8 +376,7 @@ int SavedataParam::Save(SceUtilitySavedataParam* param, const std::string &saveD
 
 	if (!pspFileSystem.GetFileInfo(dirPath).exists) {
 		if (!pspFileSystem.MkDir(dirPath)) {
-			auto err = GetI18NCategory(I18NCat::ERRORS);
-			g_OSD.Show(OSDType::MESSAGE_ERROR, err->T("Unable to write savedata, disk may be full"));
+			ERROR_LOG(Log::sceUtility, "Unable to write savedata, disk may be full");
 		}
 	}
 
@@ -484,8 +412,6 @@ int SavedataParam::Save(SceUtilitySavedataParam* param, const std::string &saveD
 		}
 
 		if (EncryptData(decryptMode, cryptedData, &cryptedSize, &aligned_len, cryptedHash, (hasKey ? param->key : 0)) != 0) {
-			auto err = GetI18NCategory(I18NCat::ERRORS);
-			g_OSD.Show(OSDType::MESSAGE_WARNING, err->T("Save encryption failed. This save won't work on real PSP"), 6.0f);
 			ERROR_LOG(Log::sceUtility,"Save encryption failed. This save won't work on real PSP");
 			delete[] cryptedData;
 			cryptedData = 0;
@@ -719,8 +645,6 @@ int SavedataParam::LoadSaveData(SceUtilitySavedataParam *param, const std::strin
 
 	// Ignore error codes.
 	if (loadedSize != 0 && (loadedSize & 0x80000000) == 0) {
-		std::string tag = "LoadSaveData/" + filePath;
-		NotifyMemInfo(MemBlockFlags::WRITE, param->dataBuf.ptr, loadedSize, tag.c_str(), tag.size());
 	}
 
 	if ((loadedSize & 0x80000000) != 0)
@@ -785,12 +709,6 @@ u32 SavedataParam::LoadCryptedSave(SceUtilitySavedataParam *param, u8 *data, con
 			WARN_LOG(Log::sceUtility, "Savedata loading with hashmode %d instead of detected %d", prevCryptMode, decryptMode);
 			decryptMode = prevCryptMode;
 
-			// Don't notify the user if we're not going to upgrade the save.
-			if (!g_Config.bEncryptSave) {
-				auto di = GetI18NCategory(I18NCat::DIALOG);
-				g_OSD.Show(OSDType::MESSAGE_WARNING, di->T("When you save, it will load on a PSP, but not an older PPSSPP"), 6.0f);
-				g_OSD.Show(OSDType::MESSAGE_WARNING, di->T("Old savedata detected"), 6.0f);
-			}
 		} else {
 			if (decryptMode == 5 && prevCryptMode == 3) {
 				WARN_LOG(Log::sceUtility, "Savedata loading with detected hashmode %d instead of file's %d", decryptMode, prevCryptMode);
@@ -799,9 +717,6 @@ u32 SavedataParam::LoadCryptedSave(SceUtilitySavedataParam *param, u8 *data, con
 			}
 
 			decryptMode = prevCryptMode;
-			auto di = GetI18NCategory(I18NCat::DIALOG);
-			g_OSD.Show(OSDType::MESSAGE_WARNING, di->T("When you save, it will not work on outdated PSP Firmware anymore"), 6.0f);
-			g_OSD.Show(OSDType::MESSAGE_WARNING, di->T("Old savedata detected"), 6.0f);
 		}
 		hasKey = decryptMode > 1;
 	}
@@ -917,8 +832,6 @@ void SavedataParam::LoadFile(const std::string& dirPath, const std::string& file
 	s64 readSize = -1;
 	if (ReadPSPFile(filePath, &buf, size, &readSize)) {
 		fileData->size = readSize;
-		const std::string tag = "SavedataLoad/" + filePath;
-		NotifyMemInfo(MemBlockFlags::WRITE, fileData->buf.ptr, fileData->size, tag.c_str(), tag.size());
 		INFO_LOG(Log::sceUtility, "Loaded subfile %s (size: %d bytes) into %08x", filePath.c_str(), fileData->size, fileData->buf.ptr);
 	} else {
 		WARN_LOG(Log::sceUtility, "Failed to load subfile %s into %08x", filePath.c_str(), fileData->buf.ptr);
@@ -1132,7 +1045,6 @@ int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 		const std::string spaceTxt = SavedataParam::GetSpaceText(freeBytes, false);
 		memset(param->msFree->freeSpaceStr, 0, sizeof(param->msFree->freeSpaceStr));
 		strncpy(param->msFree->freeSpaceStr, spaceTxt.c_str(), sizeof(param->msFree->freeSpaceStr));
-		NotifyMemInfo(MemBlockFlags::WRITE, param->msFree.ptr, sizeof(SceUtilitySavedataMsFreeInfo), "SavedataGetSizes");
 	}
 	if (param->msData.IsValid())
 	{
@@ -1169,7 +1081,6 @@ int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 			strncpy(param->msData->info.usedSpace32Str, "", sizeof(param->msData->info.usedSpace32Str));
 			ret = SCE_UTILITY_SAVEDATA_ERROR_SIZES_NO_DATA;
 		}
-		NotifyMemInfo(MemBlockFlags::WRITE, param->msData.ptr, sizeof(SceUtilitySavedataMsDataInfo), "SavedataGetSizes");
 	}
 	if (param->utilityData.IsValid())
 	{
@@ -1209,7 +1120,6 @@ int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 		INFO_LOG(Log::sceUtility, "GetSize: usedSpaceKB: %d (str: %s) (clusters: %d)", param->utilityData->usedSpaceKB, spaceTxt.c_str(), param->utilityData->usedClusters);
 		INFO_LOG(Log::sceUtility, "GetSize: usedSpace32KB: %d (str32: %s)", param->utilityData->usedSpace32KB, spaceTxt32.c_str());
 
-		NotifyMemInfo(MemBlockFlags::WRITE, param->utilityData.ptr, sizeof(SceUtilitySavedataUsedDataInfo), "SavedataGetSizes");
 	}
 	return ret;
 }
@@ -1252,7 +1162,7 @@ bool SavedataParam::GetList(SceUtilitySavedataParam *param)
 			entries[i].st_mode = 0x11FF;
 			if (sfoFiles[i].exists) {
 				tm ctime = sfoFiles[i].ctime;
-				if (PSP_CoreParameter().compat.flags().FileCreatedTimeHack) {
+				if (false /* compat FileCreatedTimeHack: not set for this game */) {
 					ctime = {};
 				}
 				ConvertTmToPspDateTime(entries[i].st_ctime, ctime, sfoFiles[i].ctimeUs);
@@ -1273,15 +1183,13 @@ bool SavedataParam::GetList(SceUtilitySavedataParam *param)
 		// Save num of folder found
 		param->idList->resultCount = (u32)validDir.size();
 		// Log out the listing.
-		if (GenericLogEnabled(Log::sceUtility, LogLevel::LINFO)) {
+		if (true) {
 			INFO_LOG(Log::sceUtility, "LIST (searchstring=%s): %d files (max: %d)", searchString.c_str(), param->idList->resultCount, maxFileCount);
 			for (size_t i = 0; i < validDir.size(); i++) {
 				NOTICE_LOG(Log::sceUtility, "LIST %s: mode %08x, ctime: %s, atime: %s, mtime: %s",
 					entries[i].name, entries[i].st_mode, FmtPspTime(entries[i].st_ctime).c_str(), FmtPspTime(entries[i].st_atime).c_str(), FmtPspTime(entries[i].st_mtime).c_str());
 			}
 		}
-		NotifyMemInfo(MemBlockFlags::WRITE, param->idList.ptr, sizeof(SceUtilitySavedataIdListInfo), "SavedataGetList");
-		NotifyMemInfo(MemBlockFlags::WRITE, param->idList->entries.ptr, (uint32_t)validDir.size() * sizeof(SceUtilitySavedataIdListEntry), "SavedataGetList");
 	}
 	return true;
 }
@@ -1387,7 +1295,7 @@ int SavedataParam::GetFilesList(SceUtilitySavedataParam *param, u32 requestAddr,
 		entry->st_size = file.size + sizeOffset;
 
 		tm ctime = file.ctime;
-		if (PSP_CoreParameter().compat.flags().FileCreatedTimeHack) {
+		if (false /* compat FileCreatedTimeHack: not set for this game */) {
 			ctime = {};
 		}
 
@@ -1400,7 +1308,7 @@ int SavedataParam::GetFilesList(SceUtilitySavedataParam *param, u32 requestAddr,
 		entry->name[15] = '\0';
 	}
 
-	if (GenericLogEnabled(Log::sceUtility, LogLevel::LINFO)) {
+	if (true) {
 		INFO_LOG(Log::sceUtility, "FILES: %d files listed (+ %d system, %d secure)", fileList->resultNumNormalEntries, fileList->resultNumSystemEntries, fileList->resultNumSecureEntries);
 		if (fileList->normalEntries.IsValid()) {
 			for (int i = 0; i < (int)fileList->resultNumNormalEntries; i++) {
@@ -1414,13 +1322,6 @@ int SavedataParam::GetFilesList(SceUtilitySavedataParam *param, u32 requestAddr,
 		// TODO: Log system and secure entries?
 	}
 
-	NotifyMemInfo(MemBlockFlags::WRITE, fileList.ptr, sizeof(SceUtilitySavedataFileListInfo), "SavedataGetFilesList");
-	if (fileList->resultNumSystemEntries != 0)
-		NotifyMemInfo(MemBlockFlags::WRITE, fileList->systemEntries.ptr, fileList->resultNumSystemEntries * sizeof(SceUtilitySavedataFileListEntry), "SavedataGetFilesList");
-	if (fileList->resultNumSecureEntries != 0)
-		NotifyMemInfo(MemBlockFlags::WRITE, fileList->secureEntries.ptr, fileList->resultNumSecureEntries * sizeof(SceUtilitySavedataFileListEntry), "SavedataGetFilesList");
-	if (fileList->resultNumNormalEntries != 0)
-		NotifyMemInfo(MemBlockFlags::WRITE, fileList->normalEntries.ptr, fileList->resultNumNormalEntries * sizeof(SceUtilitySavedataFileListEntry), "SavedataGetFilesList");
 
 	return 0;
 }
@@ -1487,7 +1388,6 @@ bool SavedataParam::GetSize(SceUtilitySavedataParam *param) {
 		INFO_LOG(Log::sceUtility, "GETSIZE: SectorSize: %d FreeSectors: %d FreeKB: %d neededKb: %d overwriteKb: %d",
 			param->sizeInfo->sectorSize, param->sizeInfo->freeSectors, param->sizeInfo->freeKB, param->sizeInfo->neededKB, param->sizeInfo->overwriteKB);
 
-		NotifyMemInfo(MemBlockFlags::WRITE, param->sizeInfo.ptr, sizeof(PspUtilitySavedataSizeInfo), "SavedataGetSize");
 	}
 
 	return exists;
@@ -1955,94 +1855,6 @@ bool SavedataParam::WouldHaveMultiSaveName(const SceUtilitySavedataParam *param)
 		return false;
 	default:
 		return true;
-	}
-}
-
-// Slots without an icon of their own shared noSaveIcon's image before the save, but come back as
-// separate images of the same texture. Share it again, or Clear() frees it once per slot.
-void SavedataParam::ShareLoadedIcons() {
-	for (int i = 0; i < saveDataListCount; i++) {
-		PPGeImage *texture = saveDataList[i].texture;
-		if (!texture || texture->TextureAddress() == 0) {
-			continue;
-		}
-		for (int j = 0; j < i; j++) {
-			PPGeImage *other = saveDataList[j].texture;
-			if (other && other->TextureAddress() == texture->TextureAddress()) {
-				if (!noSaveIcon) {
-					noSaveIcon = new SaveFileInfo();
-					noSaveIcon->texture = other;
-				}
-				texture->Forget();
-				delete texture;
-				saveDataList[i].texture = other;
-				break;
-			}
-		}
-	}
-}
-
-void SavedataParam::DoState(PointerWrap &p) {
-	auto s = p.Section("SavedataParam", 1, 2);
-	if (!s)
-		return;
-
-	if (p.mode == p.MODE_READ) {
-		// The load replaces kernel memory, so the icons' texture addresses now belong to whatever
-		// the loaded state allocated there. Drop them without freeing those.
-		std::vector<PPGeImage *> oldTextures;
-		for (int i = 0; saveDataList && i < saveDataListCount; i++) {
-			if (saveDataList[i].texture) {
-				oldTextures.push_back(saveDataList[i].texture);
-				saveDataList[i].texture = nullptr;
-			}
-		}
-		if (noSaveIcon) {
-			oldTextures.push_back(noSaveIcon->texture);
-			delete noSaveIcon;
-			noSaveIcon = nullptr;
-		}
-		// Entries may share noSaveIcon's image.
-		std::sort(oldTextures.begin(), oldTextures.end());
-		oldTextures.erase(std::unique(oldTextures.begin(), oldTextures.end()), oldTextures.end());
-		for (PPGeImage *texture : oldTextures) {
-			if (texture) {
-				texture->Forget();
-				delete texture;
-			}
-		}
-	}
-
-	// pspParam is handled in PSPSaveDialog.
-	Do(p, selectedSave);
-	Do(p, saveDataListCount);
-	Do(p, saveNameListDataCount);
-	if (p.mode == p.MODE_READ) {
-		delete [] saveDataList;
-		saveDataList = nullptr;
-		if (saveDataListCount < 0 || !p.CheckRead(saveDataListCount)) {
-			saveDataListCount = 0;
-			saveNameListDataCount = 0;
-			p.SetError(p.ERROR_FAILURE);
-			return;
-		}
-		// Clear() leaves the name count behind, but it's only used to walk the list.
-		saveNameListDataCount = std::clamp(saveNameListDataCount, 0, saveDataListCount);
-		if (saveDataListCount != 0) {
-			saveDataList = new SaveFileInfo[saveDataListCount];
-			DoArray(p, saveDataList, saveDataListCount);
-			ShareLoadedIcons();
-		} else {
-			saveDataList = nullptr;
-		}
-	}
-	else
-		DoArray(p, saveDataList, saveDataListCount);
-
-	if (s >= 2) {
-		Do(p, ignoreTextures_);
-	} else {
-		ignoreTextures_ = false;
 	}
 }
 

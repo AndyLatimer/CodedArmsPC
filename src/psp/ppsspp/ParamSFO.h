@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: only what savedata needs (no disc ID / region helpers); types from
+// ppsspp_utility_compat.h.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -21,10 +23,9 @@
 #include <map>
 #include <vector>
 
-#include "Common/CommonTypes.h"
-#include "Common/Log.h"
+#include <string>
 
-class Path;
+#include "ppsspp_utility_compat.h"
 
 class ParamSFOData {
 public:
@@ -38,10 +39,6 @@ public:
 	const u8 *GetValueData(std::string_view key, unsigned int *size) const;
 
 	std::vector<std::string> GetKeys() const;
-	std::string GenerateFakeID(const Path &filename) const;
-
-	std::string GetDiscID();
-
 	// PSP_SYSTEM_VER, the firmware a disc says it needs, as major * 100 + minor - "2.60" gives
 	// 260, which sorts the way you'd want. Zero if the key is missing or unparseable; homebrew
 	// often leaves it out, but retail discs practically always set it.
@@ -106,27 +103,3 @@ public:
 private:
 	std::map<std::string, ValueData, std::less<>> values;
 };
-
-// Utilities for parsing the information.
-
-// Guessed from GameID, not necessarily accurate
-// Can't change the order of these.
-enum class GameRegion {
-	JAPAN,
-	USA,
-	EUROPE,
-	HONGKONG,
-	ASIA,
-	KOREA,
-	COUNT,
-	HOMEBREW = COUNT,
-	UNKNOWN,
-	INTERNAL,
-	TEST,
-	DIAGNOSTIC,
-	FIRMWARE,
-	VSH,
-};
-
-GameRegion DetectGameRegionFromID(std::string_view id_version);
-std::string_view GameRegionToString(GameRegion region);  // These strings can be looked up I18NCat::GAME.

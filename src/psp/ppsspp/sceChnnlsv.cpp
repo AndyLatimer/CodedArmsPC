@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: the guest-facing HLE wrappers (sceSd*/sceUtilsBufferCopy* syscalls)
+// are left out, the game imports neither library; the savedata code calls the functions directly.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,12 +19,7 @@
 
 #include <mutex>
 
-#include "Core/MemMapHelpers.h"
-#include "Core/HLE/HLE.h"
-#include "Core/HLE/FunctionWrappers.h"
-
-#include "Core/HLE/sceChnnlsv.h"
-#include "Core/HLE/sceKernel.h"
+#include "sceChnnlsv.h"
 
 static KirkState g_kirk;
 
@@ -221,16 +218,6 @@ static int sub_17A8(KirkState *kirk, u8* data)
 	return -261;
 }
 
-static int sceSdGetLastIndex(u32 addressCtx, u32 addressHash, u32 addressKey) {
-	auto ctx = PSPPointer<pspChnnlsvContext1>::Create(addressCtx);
-	u8 *hash = Memory::GetPointerWriteOrException(addressHash);
-	if (!ctx.IsValid() || !hash)
-		return hleLogError(Log::sceMisc, 0, "Invalid pointer");
-	// The key is optional: the VSH's Saved Data Utility checks PARAM.SFO hashes with none.
-	const u8 *key = addressKey ? Memory::GetPointerWriteOrException(addressKey) : nullptr;
-	return hleLogDebug(Log::sceMisc, sceSdMacFinal(*ctx, hash, key));
-}
-
 int sceSdMacFinal(pspChnnlsvContext1& ctx, u8* in_hash, const u8* in_key)
 {
 	std::lock_guard<std::mutex> guard(g_lock);
@@ -334,13 +321,6 @@ int sceSdMacFinal(pspChnnlsvContext1& ctx, u8* in_hash, const u8* in_key)
 	return 0;
 }
 
-static int sceSdSetIndex(u32 addressCtx, int value) {
-	auto ctx = PSPPointer<pspChnnlsvContext1>::Create(addressCtx);
-	if (!ctx.IsValid())
-		return hleLogError(Log::sceMisc, 0, "Invalid pointer");
-	return hleLogDebug(Log::sceMisc, sceSdMacInit(*ctx, value));
-}
-
 int sceSdMacInit(pspChnnlsvContext1& ctx, int value)
 {
 	ctx.mode = value;
@@ -350,13 +330,6 @@ int sceSdMacInit(pspChnnlsvContext1& ctx, int value)
 	return 0;
 }
 
-
-static int sceSdRemoveValue(u32 addressCtx, u32 addressData, int length) {
-	auto ctx = PSPPointer<pspChnnlsvContext1>::Create(addressCtx);
-	if (!ctx.IsValid() || !Memory::IsValidAddress(addressData))
-		return hleLogError(Log::sceMisc, 0, "Invalid pointer");
-	return hleLogDebug(Log::sceMisc, sceSdMacUpdate(*ctx, Memory::GetPointerWriteOrException(addressData), length));
-}
 
 int sceSdMacUpdate(pspChnnlsvContext1& ctx, const u8* data, int length)
 {
@@ -399,17 +372,6 @@ int sceSdMacUpdate(pspChnnlsvContext1& ctx, const u8* data, int length)
 		sub_1510(&g_kirk, dataBuf, newSize, ctx.result, num);
 	// The RE code showed this always returning 0. I suspect it would want to return res instead.
 	return 0;
-}
-
-static int sceSdCreateList(u32 ctx2Addr, int mode, int unkwn, u32 dataAddr, u32 cryptkeyAddr) {
-	auto ctx2 = PSPPointer<pspChnnlsvContext2>::Create(ctx2Addr);
-	u8* data = Memory::GetPointerWriteOrException(dataAddr);
-	// Optional, as in sceSdGetLastIndex.
-	u8* cryptkey = cryptkeyAddr ? Memory::GetPointerWriteOrException(cryptkeyAddr) : nullptr;
-	if (!ctx2.IsValid() || !data)
-		return hleLogError(Log::sceMisc, 0, "Invalid pointer");
-
-	return hleLogDebug(Log::sceMisc, sceSdCipherInit(*ctx2, mode, unkwn, data, cryptkey));
 }
 
 int sceSdCipherInit(pspChnnlsvContext2& ctx2, int mode, int uknw, u8* data, const u8* cryptkey)
@@ -467,15 +429,6 @@ int sceSdCipherInit(pspChnnlsvContext2& ctx2, int mode, int uknw, u8* data, cons
 	return 0;
 }
 
-static int sceSdSetMember(u32 ctxAddr, u32 dataAddr, int alignedLen) {
-	auto ctx = PSPPointer<pspChnnlsvContext2>::Create(ctxAddr);
-	u8 *data = Memory::GetPointerWriteOrException(dataAddr);
-	if (!ctx.IsValid() || !data)
-		return hleLogError(Log::sceMisc, 0, "Invalid pointer");
-
-	return hleLogDebug(Log::sceMisc, sceSdCipherUpdate(*ctx, data, alignedLen));
-}
-
 int sceSdCipherUpdate(pspChnnlsvContext2& ctx, u8* data, int alignedLen)
 {
 	std::lock_guard<std::mutex> guard(g_lock);
@@ -511,13 +464,6 @@ int sceSdCipherUpdate(pspChnnlsvContext2& ctx, u8* data, int alignedLen)
 	return res;
 }
 
-static int sceSdCleanList(u32 ctxAddr) {
-	auto ctx = PSPPointer<pspChnnlsvContext2>::Create(ctxAddr);
-	if (!ctx.IsValid())
-		return hleLogError(Log::sceMisc, 0, "Invalid pointer");
-	return hleLogDebug(Log::sceMisc, sceSdCipherFinal(*ctx));
-}
-
 int sceSdCipherFinal(pspChnnlsvContext2& ctx)
 {
 	memset(ctx.cryptedData, 0, 16);
@@ -527,50 +473,7 @@ int sceSdCipherFinal(pspChnnlsvContext2& ctx)
 	return 0;
 }
 
-const HLEFunction sceChnnlsv[] =
+void __ChnnlsvInit()
 {
-	{0XE7833020, &WrapI_UI<sceSdSetIndex>,           "sceSdSetIndex",       'i', "xi"   },
-	{0XF21A1FCA, &WrapI_UUI<sceSdRemoveValue>,       "sceSdRemoveValue",    'i', "xxi"  },
-	{0XC4C494F8, &WrapI_UUU<sceSdGetLastIndex>,      "sceSdGetLastIndex",   'i', "xxx"  },
-	{0XABFDFC8B, &WrapI_UIIUU<sceSdCreateList>,      "sceSdCreateList",     'i', "xiixx"},
-	{0X850A7FA1, &WrapI_UUI<sceSdSetMember>,         "sceSdSetMember",      'i', "xxi"  },
-	{0X21BE78B4, &WrapI_U<sceSdCleanList>,           "sceSdCleanList",      'i', "x"    },
-};
-
-void Register_sceChnnlsv()
-{
-	RegisterHLEModule("sceChnnlsv", ARRAY_SIZE(sceChnnlsv), sceChnnlsv);
 	kirk_init(&g_kirk);
-}
-
-// The below functions don't really belong to sceKernelSemaphore. They are the core crypto functionality,
-// exposed through the confusingly named "sceUtilsBufferCopyWithRange" name, which Sony placed in the
-// not-at-all-suspicious "semaphore" library, which has nothing to do with semaphores.
-
-static u32 sceUtilsBufferCopyWithRange(u32 outAddr, int outSize, u32 inAddr, int inSize, int cmd) {
-	u8 *outAddress = Memory::IsValidRange(outAddr, outSize) ? Memory::GetPointerWriteUnchecked(outAddr) : nullptr;
-	u8 *inAddress = Memory::IsValidRange(inAddr, inSize) ? Memory::GetPointerWriteUnchecked(inAddr) : nullptr;
-	std::lock_guard<std::mutex> guard(g_lock);
-	int temp = kirk_sceUtilsBufferCopyWithRange(&g_kirk, outAddress, outSize, inAddress, inSize, cmd);
-	if (temp != 0) {
-		ERROR_LOG(Log::sceKernel, "hleUtilsBufferCopyWithRange: Failed with %d", temp);
-	}
-	return hleNoLog(0);
-}
-
-// Note sure what difference there is between this and sceUtilsBufferCopyWithRange.
-static int sceUtilsBufferCopyByPollingWithRange(u32 outAddr, int outSize, u32 inAddr, int inSize, int cmd) {
-	u8 *outAddress = Memory::IsValidRange(outAddr, outSize) ? Memory::GetPointerWriteUnchecked(outAddr) : nullptr;
-	u8 *inAddress = Memory::IsValidRange(inAddr, inSize) ? Memory::GetPointerWriteUnchecked(inAddr) : nullptr;
-	std::lock_guard<std::mutex> guard(g_lock);
-	return hleNoLog(kirk_sceUtilsBufferCopyWithRange(&g_kirk, outAddress, outSize, inAddress, inSize, cmd));
-}
-
-const HLEFunction semaphore[] = {
-	{0x4C537C72, &WrapU_UIUII<sceUtilsBufferCopyWithRange>,          "sceUtilsBufferCopyWithRange",                   'x', "xixii" },
-	{0x77E97079, &WrapI_UIUII<sceUtilsBufferCopyByPollingWithRange>, "sceUtilsBufferCopyByPollingWithRange",          'i', "xixii"  },
-};
-
-void Register_semaphore() {
-	RegisterHLEModule("semaphore", ARRAY_SIZE(semaphore), semaphore);
 }

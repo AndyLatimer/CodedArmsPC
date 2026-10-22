@@ -1,6 +1,15 @@
 // ca_psprun: headless runner for the recompiled game (development tool).
 //   ca_psprun --iso CodedArms.iso [--trace] [--seconds N] [--wav out.wav]
-//             [--press BUTTON@SECONDS[:HOLD]]...
+//             [--press BUTTON@SECONDS[:HOLD]]... [--memstick DIR]
+// --memstick (or CA_MEMSTICK) is the host folder mapped to ms0:/ (default ./memstick).
+// System dialogs (savedata, messages) have no screen here: they are logged, and answered by the
+// policy in CA_DIALOG_POLICY after CA_DIALOG_DELAY_MS (default 500) of being shown:
+//   default  - the dialog's default: the highlighted Yes/No choice, the highlighted savedata
+//              entry, OK; a screen with only a Back button is closed with it
+//   yes / no - choose Yes / No in yes/no questions, otherwise as default
+//   cancel   - press the cancel button
+//   none     - never answer
+//   buttons  - no policy: the dialogs read the emulated controller like PPSSPP (use --press)
 // --wav consumes the guest audio channels in real time like a host mixer would and writes
 // the mix to a 44.1 kHz stereo WAV file (for checking sound output without a window).
 #include <algorithm>
@@ -14,7 +23,12 @@
 #include <vector>
 
 #include "psp/host.h"
+#include "psp/host_dialog.h"
 #include "psp/kernel.h"
+
+namespace psp::kernel {
+extern std::string g_hostMsRoot;
+}
 
 namespace {
 FILE* g_wav = nullptr;
@@ -56,6 +70,60 @@ void wavThread() {
 
 struct Press { uint32_t buttons; double at, hold; };
 
+void logDialog(const psp::host::DialogView& v) {
+    using namespace psp::host;
+    std::string text = v.text;
+    for (char& ch : text) if (ch == '\n') ch = '|';
+    std::string extra;
+    if (v.yesNo) extra += v.yesNoChoice ? " [YES] no" : " yes [NO]";
+    if (v.ok) extra += " [OK]";
+    if (v.busy) extra += " (busy)";
+    if (v.confirmButton) extra += " confirm=" + v.confirmLabel;
+    if (v.cancelButton) extra += " cancel=" + v.cancelLabel;
+    std::fprintf(stderr, "[DIALOG] %s%s%s: \"%s\"%s\n", v.kind == DialogKind::Message ? "message" : "savedata",
+                 v.banner.empty() ? "" : " ", v.banner.c_str(), text.c_str(), extra.c_str());
+    for (size_t i = 0; i < v.entries.size(); ++i) {
+        const DialogSaveEntry& e = v.entries[i];
+        std::fprintf(stderr, "[DIALOG]   %c %s: %s / %s (%lld bytes%s, icon %zu bytes)\n", (int)i == v.selected ? '>' : ' ',
+                     e.saveName.c_str(), e.title.c_str(), e.savedataTitle.c_str(), (long long)e.sizeBytes, e.broken ? ", broken" : "",
+                     e.iconPng.size());
+    }
+    if (v.showsEntry)
+        std::fprintf(stderr, "[DIALOG]   slot %s: %s / %s (%lld bytes, icon %zu bytes)\n", v.entry.saveName.c_str(), v.entry.title.c_str(),
+                     v.entry.savedataTitle.c_str(), (long long)v.entry.sizeBytes, v.entry.iconPng.size());
+}
+
+void installDialogPolicy() {
+    using namespace psp::host;
+    const char* p = std::getenv("CA_DIALOG_POLICY");
+    std::string policy = p ? p : "default";
+    const char* d = std::getenv("CA_DIALOG_DELAY_MS");
+    uint64_t delayUs = (uint64_t)(d ? std::atoi(d) : 500) * 1000;
+    setDialogObserver(logDialog);
+    if (policy == "buttons") { setDialogUsesController(true); return; }
+    if (policy == "none") return;
+    setDialogAutoResponder([policy, delayUs](const DialogView& v, uint64_t visibleUs, DialogInput& in) {
+        if (visibleUs < delayUs || v.fade < 255) return false;
+        if (policy == "cancel") {
+            if (!v.cancelButton) return false;
+            in.cancel = true;
+        } else if (v.yesNo) {
+            in.yesNoChoice = policy == "yes" ? 1 : (policy == "no" ? 0 : v.yesNoChoice);
+            in.confirm = true;
+        } else if (v.confirmButton) {
+            in.select = v.selected;
+            in.confirm = true;
+        } else if (v.cancelButton) {
+            in.cancel = true; // result screens ("Save completed") close with the cancel button
+        } else {
+            return false;
+        }
+        std::fprintf(stderr, "[DIALOG] auto answer (%s): %s%s\n", policy.c_str(), in.confirm ? "confirm" : "cancel",
+                     in.yesNoChoice < 0 ? "" : (in.yesNoChoice ? " yes" : " no"));
+        return true;
+    });
+}
+
 uint32_t buttonByName(const std::string& n) {
     using namespace psp::host;
     static const std::pair<const char*, uint32_t> names[] = {
@@ -82,6 +150,7 @@ void pressThread(std::vector<Press> presses) {
 
 int main(int argc, char** argv) {
     psp::kernel::BootOptions opt;
+    if (const char* ms = std::getenv("CA_MEMSTICK")) psp::kernel::g_hostMsRoot = ms;
     int seconds = 0;
     std::vector<Press> presses;
     for (int i = 1; i < argc; ++i) {
@@ -97,6 +166,7 @@ int main(int argc, char** argv) {
             if (colon != std::string::npos) p.hold = std::atof(spec.c_str() + colon + 1);
             presses.push_back(p);
         }
+        else if (!std::strcmp(argv[i], "--memstick") && i + 1 < argc) psp::kernel::g_hostMsRoot = argv[++i];
         else if (!std::strcmp(argv[i], "--wav") && i + 1 < argc) {
             g_wav = std::fopen(argv[++i], "wb");
             if (g_wav) { writeWavHeader(g_wav, 0); std::thread(wavThread).detach(); }
@@ -115,6 +185,8 @@ int main(int argc, char** argv) {
             std::_Exit(0);
         }).detach();
     }
+    if (!psp::kernel::g_hostMsRoot.empty() && psp::kernel::g_hostMsRoot.back() != '/') psp::kernel::g_hostMsRoot += '/';
+    installDialogPolicy();
     if (!presses.empty()) std::thread(pressThread, presses).detach();
     return psp::kernel::boot(opt);
 }

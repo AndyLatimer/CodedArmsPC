@@ -1,4 +1,8 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: no PPGe drawing and no save states. The Display*/StartDraw/EndDraw
+// calls build a psp::host::DialogView that is published to the front end (src/psp/host_dialog.h),
+// and button presses come from the host dialog input (or the emulated controller). Timing uses
+// the runtime's clock instead of CoreTiming.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,13 +23,32 @@
 
 #include <initializer_list>
 
-#include "Common/CommonTypes.h"
-#include "Common/Render/TextureAtlas.h"
-#include "Common/Swap.h"
-#include "Core/HLE/sceUtility.h"
-#include "Core/Util/PPGeDraw.h"
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
 
-class PointerWrap;
+#include "ppsspp_utility_compat.h"
+#include "psp/host_dialog.h"
+
+// Stand-in for PPSSPP's PPGeImage: the PNG bytes of a savedata icon, read from the memory stick
+// or from guest memory, handed to the front end instead of being uploaded as a texture.
+class PPGeImage {
+public:
+	explicit PPGeImage(const std::string &pspFilename);
+	PPGeImage(u32 pngPointer, size_t pngSize);
+	bool IsValid() const { return !png_.empty(); }
+	const std::vector<u8> &Png() const { return png_; }
+private:
+	std::vector<u8> png_;
+};
+
+// Implemented in src/psp/hle_utility.cpp (PPSSPP: sceUtility.cpp / sceKernelMemory.cpp).
+void UtilityDialogInitialize(UtilityDialogType type, int delayUs, int accessPriority, int graphicsPriority);
+void UtilityDialogShutdown(UtilityDialogType type, int delayUs, int accessPriority, int graphicsPriority);
+int KernelVolatileMemLock(int type, u32 paddr, u32 psize);
+int KernelVolatileMemUnlock(int type);
+u64 UtilityNowUs();
 
 #define SCE_UTILITY_DIALOG_RESULT_SUCCESS      0
 #define SCE_UTILITY_DIALOG_RESULT_CANCEL       1
@@ -50,9 +73,6 @@ public:
 
 	virtual int Update(int animSpeed) = 0;
 	virtual int Shutdown(bool force = false);
-	virtual void DoState(PointerWrap &p);
-	// For loading a state that doesn't have this dialog: back to NONE, without anything Shutdown does
-	// on the way (writing results, releasing volatile memory), which would hit the loaded state.
 	virtual void ResetState();
 	virtual pspUtilityDialogCommon *GetCommonParam() {
 		// This is returned properly by the derived classes (or should be...).
@@ -94,15 +114,12 @@ public:
 protected:
 	void InitCommon();
 	void UpdateCommon();
-	PPGeStyle FadedStyle(PPGeAlign align, float scale);
-	PPGeImageStyle FadedImageStyle();
 	void UpdateButtons();
 	bool IsFadingOut() const;
 	bool IsButtonPressed(int checkButton);
 	bool IsButtonHeld(int checkButton, int &framesHeld, int framesHeldThreshold = 30, int framesHeldRepeatRate = 10);
 	// The caption override is assumed to have a size of 64 bytes.
 	void DisplayButtons(int flags, std::string_view caption = "");
-	void DisplayMessage2(std::string_view text1, std::string_view text2a = "", std::string_view text2b = "", std::string_view text3a = "", std::string_view text3b = "", bool hasYesNo = false, bool hasOK = false);
 	void ChangeStatus(DialogStatus newStatus, int delayUs);
 	void UpdatePendingStatus();
 	void ChangeStatusInit(int delayUs);
@@ -140,12 +157,15 @@ protected:
 	bool fadeIn = false;
 	u32 fadeValue = 0;
 
-	ImageID okButtonImg;
-	ImageID cancelButtonImg;
+	// What this frame shows, built by StartDraw/Display*/EndDraw.
+	psp::host::DialogView view_;
+	// Input taken from the host for this Update.
+	psp::host::DialogInput hostInput_;
+	bool hasHostInput_ = false;
+	unsigned int controllerPrev_ = 0;
 	int okButtonFlag = 0;
 	int cancelButtonFlag = 0;
 
-	// DisplayMessage2 variables
 	int yesnoChoice = 0;
 	float scrollPos_ = 0.0f;
 	int framesUpHeld_ = 0;

@@ -1,4 +1,5 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: drawing replaced by the host dialog view, save states removed.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,8 +20,7 @@
 
 #include <string>
 
-#include "Common/Swap.h"
-#include "Core/Dialog/PSPDialog.h"
+#include "PSPDialog.h"
 
 #define SCE_UTILITY_MSGDIALOG_OPTION_ERRORSOUND         0x00000000
 #define SCE_UTILITY_MSGDIALOG_OPTION_TEXTSOUND          0x00000001
@@ -61,7 +61,6 @@ public:
 	int Init(unsigned int paramAddr);
 	int Update(int animSpeed) override;
 	int Shutdown(bool force = false) override;
-	void DoState(PointerWrap &p) override;
 	pspUtilityDialogCommon *GetCommonParam() override;
 
 	int Abort();

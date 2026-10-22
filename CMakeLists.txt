@@ -83,8 +83,24 @@ add_library(ca_psp OBJECT
   src/psp/ge.cpp
   src/psp/ppsspp/InterpreterVFPU.cpp
   src/psp/ppsspp/MIPSVFPUUtils.cpp
+  # sceUtility savedata / message dialogs (PPSSPP port) and the host dialog interface
+  src/psp/hle_utility.cpp
+  src/psp/host_dialog.cpp
+  src/psp/ppsspp/ppsspp_utility_compat.cpp
+  src/psp/ppsspp/PSPDialog.cpp
+  src/psp/ppsspp/PSPMsgDialog.cpp
+  src/psp/ppsspp/PSPSaveDialog.cpp
+  src/psp/ppsspp/SavedataParam.cpp
+  src/psp/ppsspp/ParamSFO.cpp
+  src/psp/ppsspp/sceChnnlsv.cpp
 )
-target_include_directories(ca_psp PUBLIC src src/psp/ppsspp)
+# KIRK crypto engine from PPSSPP's ext/libkirk (savedata encryption), see third_party/libkirk.
+add_library(ca_kirk OBJECT third_party/libkirk/kirk_engine.c third_party/libkirk/AES.c
+  third_party/libkirk/SHA1.c third_party/libkirk/bn.c third_party/libkirk/ec.c)
+if(NOT MSVC)
+  target_compile_options(ca_kirk PRIVATE -w)
+endif()
+target_include_directories(ca_psp PUBLIC src src/psp/ppsspp third_party/libkirk)
 target_compile_options(ca_psp PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-function -Wno-sign-compare -Wno-missing-field-initializers>)
 find_package(Threads REQUIRED)
 
@@ -105,7 +121,7 @@ if(CA_GAME_ISO)
     target_compile_options(ca_guest PRIVATE -w -fwrapv -fno-strict-aliasing)
   endif()
 
-  add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_guest>)
+  add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
   target_include_directories(ca_psprun PRIVATE src)
   target_link_libraries(ca_psprun PRIVATE Threads::Threads)
   if(MINGW)

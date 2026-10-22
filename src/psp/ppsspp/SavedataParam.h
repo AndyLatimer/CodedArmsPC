@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: save states removed; icons are kept as PNG bytes (PPGeImage stand-in in
+// PSPDialog.h) for the host dialog interface instead of PPGe textures.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -23,18 +25,14 @@
 #include <unordered_map>
 #include <cstdint>
 
-#include "Common/CommonTypes.h"
-#include "Core/ELF/ParamSFO.h"
-#include "Core/MemMap.h"
-#include "Core/HLE/sceRtc.h"
-#include "Core/Dialog/PSPDialog.h"
+#include "ppsspp_utility_compat.h"
+#include "ParamSFO.h"
+#include "PSPDialog.h"
 
 #undef st_ctime
 #undef st_atime
 #undef st_mtime
 
-class PPGeImage;
-struct PSPFileInfo;
 typedef u32_le SceSize_le;
 
 enum SceUtilitySavedataType
@@ -290,8 +288,6 @@ struct SaveFileInfo
 	tm modif_time{};
 
 	PPGeImage *texture = nullptr;
-
-	void DoState(PointerWrap &p);
 };
 
 struct SaveSFOFileListEntry {
@@ -359,11 +355,8 @@ public:
 
 	void ClearSFOCache();
 
-	void DoState(PointerWrap &p);
-
 private:
 	void Clear();
-	void ShareLoadedIcons();
 	void SetFileInfo(int idx, PSPFileInfo &info, const std::string &saveName, const std::string &saveDir = "");
 	void SetFileInfo(SaveFileInfo &saveInfo, PSPFileInfo &info, const std::string &saveName, const std::string &saveDir = "");
 	void ClearFileInfo(SaveFileInfo &saveInfo, const std::string &saveName);

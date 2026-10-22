@@ -1,4 +1,7 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: drawing replaced by the host dialog view (see PSPDialog.h), input from
+// the host dialog interface or the emulated controller, CoreTiming ticks replaced by microseconds,
+// save states removed.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -16,23 +19,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
-#include "Common/Data/Text/I18n.h"
 
-#include "Common/Serialize/Serializer.h"
-#include "Common/Serialize/SerializeFuncs.h"
-#include "Common/StringUtils.h"
-#include "Common/Data/Encoding/Utf8.h"
-#include "Core/Config.h"
-#include "Core/System.h"
-#include "Core/CoreTiming.h"
-#include "Core/Dialog/PSPDialog.h"
-#include "Core/HLE/PopsBoot.h"
-#include "Core/HLE/sceCtrl.h"
-#include "Core/HLE/sceKernelThread.h"
-#include "Core/HLE/scePower.h"
-#include "Core/HLE/sceUtility.h"
-#include "Core/MemMapHelpers.h"
-#include "Core/Util/PPGeDraw.h"
+#include "PSPDialog.h"
+#include "psp/host.h"
 
 // In seconds. On a PSP, dialog animations advance by animSpeed frames per Update and take about
 // this long.
@@ -74,9 +63,9 @@ void PSPDialog::InitCommon() {
 	if (const pspUtilityDialogCommon *common = GetCommonParam()) {
 		// How these compare with the calling thread decides what the game sees from GetStatus right
 		// after InitStart/ShutdownStart.
-		DEBUG_LOG(Log::sceUtility, "%s thread priorities: graphics=%d access=%d font=%d sound=%d (caller %d)",
+		INFO_LOG(Log::sceUtility, "%s thread priorities: graphics=%d access=%d font=%d sound=%d",
 			UtilityDialogTypeToString(DialogType()), common->graphicsThread, common->accessThread,
-			common->fontThread, common->soundThread, KernelCurThreadPriority());
+			common->fontThread, common->soundThread);
 	}
 
 	if (GetCommonParam() && GetCommonParam()->language != GetPSPLanguage()) {
@@ -85,20 +74,16 @@ void PSPDialog::InitCommon() {
 }
 
 void PSPDialog::UpdateCommon() {
-	okButtonImg = ImageID("I_CIRCLE");
-	cancelButtonImg = ImageID("I_CROSS");
 	okButtonFlag = CTRL_CIRCLE;
 	cancelButtonFlag = CTRL_CROSS;
 	if (GetCommonParam() && GetCommonParam()->buttonSwap == 1) {
-		okButtonImg = ImageID("I_CROSS");
-		cancelButtonImg = ImageID("I_CIRCLE");
 		okButtonFlag = CTRL_CROSS;
 		cancelButtonFlag = CTRL_CIRCLE;
 	}
 }
 
 void PSPDialog::UpdatePendingStatus() {
-	if (pendingStatusTicks != 0 && CoreTiming::GetTicks(currentMIPS) >= pendingStatusTicks) {
+	if (pendingStatusTicks != 0 && UtilityNowUs() >= pendingStatusTicks) {
 		bool changeAllowed = true;
 		if (pendingStatus == SCE_UTILITY_STATUS_NONE && status == SCE_UTILITY_STATUS_SHUTDOWN) {
 			FinishVolatile();
@@ -161,7 +146,7 @@ void PSPDialog::ChangeStatus(DialogStatus newStatus, int delayUs) {
 		pendingStatusTicks = 0;
 	} else {
 		pendingStatus = newStatus;
-		pendingStatusTicks = CoreTiming::GetTicks(currentMIPS) + usToCycles(delayUs);
+		pendingStatusTicks = UtilityNowUs() + (u64)delayUs;
 	}
 }
 
@@ -171,10 +156,8 @@ void PSPDialog::FinishVolatile() {
 
 	if (KernelVolatileMemUnlock(0) == 0) {
 		volatileLocked_ = false;
-		// Simulate modifications to volatile memory. Not under the PS1 emulator, which keeps its heap there.
-		if (!PopsBootActive()) {
-			Memory::Memset(PSP_GetVolatileMemoryStart(), 0, PSP_GetVolatileMemoryEnd() - PSP_GetVolatileMemoryStart());
-		}
+		// Simulate modifications to volatile memory.
+		Memory::Memset(PSP_GetVolatileMemoryStart(), 0, PSP_GetVolatileMemoryEnd() - PSP_GetVolatileMemoryStart());
 	}
 }
 
@@ -222,17 +205,21 @@ void PSPDialog::ChangeStatusShutdown(int delayUs) {
 
 void PSPDialog::StartDraw()
 {
-	PPGeBegin();
-	PPGeDrawRect(0, 0, 480, 272, CalcFadedColor(0x20000000));
+	view_ = psp::host::DialogView();
+	view_.kind = DialogType() == UtilityDialogType::MSG ? psp::host::DialogKind::Message : psp::host::DialogKind::Savedata;
+	view_.crossConfirms = okButtonFlag == CTRL_CROSS;
+	view_.yesNoChoice = yesnoChoice;
 }
 
 void PSPDialog::EndDraw()
 {
-	PPGeEnd();
+	view_.fade = (int)fadeValue;
+	psp::host::publishDialog(view_);
 }
 
 int PSPDialog::Shutdown(bool force)
 {
+	psp::host::closeDialog();
 	if (force) {
 		ChangeStatus(SCE_UTILITY_STATUS_NONE, 0);
 	} else {
@@ -268,6 +255,7 @@ void PSPDialog::UpdateFade(int animSpeed) {
 }
 
 void PSPDialog::FinishFadeOut() {
+	psp::host::closeDialog();
 	ChangeStatus(SCE_UTILITY_STATUS_FINISHED, 0);
 }
 
@@ -286,46 +274,29 @@ void PSPDialog::ResetState() {
 	fadeValue = 0;
 }
 
-void PSPDialog::DoState(PointerWrap &p) {
-	auto s = p.Section("PSPDialog", 1, 3);
-	if (!s)
-		return;
-
-	Do(p, status);
-	Do(p, lastButtons);
-	Do(p, buttons);
-	Do(p, fadeTimer);
-	Do(p, isFading);
-	Do(p, fadeIn);
-	Do(p, fadeValue);
-
-	// I don't think we should save these two... Let's just ignore them for now for compat.
-	int okButtonImg = 0;
-	Do(p, okButtonImg);
-	int cancelButtonImg = 0;
-	Do(p, cancelButtonImg);
-
-	Do(p, okButtonFlag);
-	Do(p, cancelButtonFlag);
-
-	if (s >= 2) {
-		Do(p, pendingStatus);
-		Do(p, pendingStatusTicks);
-	} else {
-		pendingStatusTicks = 0;
-	}
-
-	if (s >= 3) {
-		Do(p, volatileLocked_);
-	} else {
-		volatileLocked_ = false;
-	}
-}
-
 void PSPDialog::UpdateButtons()
 {
-	lastButtons = __CtrlPeekButtons();
-	buttons = __CtrlReadLatch();
+	hasHostInput_ = false;
+	if (psp::host::dialogUsesController()) {
+		// PPSSPP: __CtrlPeekButtons / __CtrlReadLatch (buttons newly pressed since the last read).
+		const unsigned int cur = psp::host::g_ctrl.buttons.load();
+		lastButtons = cur;
+		buttons = cur & ~controllerPrev_;
+		controllerPrev_ = cur;
+		return;
+	}
+	lastButtons = 0;
+	buttons = 0;
+	if (!psp::host::takeDialogInput(hostInput_))
+		return;
+	hasHostInput_ = true;
+	// The host chose with the same buttons a player would press.
+	if (hostInput_.yesNoChoice == 0 || hostInput_.yesNoChoice == 1)
+		yesnoChoice = hostInput_.yesNoChoice;
+	if (hostInput_.confirm)
+		buttons |= okButtonFlag;
+	if (hostInput_.cancel)
+		buttons |= cancelButtonFlag;
 }
 
 // Input is fine while fading in, but not while fading out: the choice has already been made.
@@ -340,7 +311,7 @@ bool PSPDialog::IsButtonPressed(int checkButton)
 
 bool PSPDialog::IsButtonHeld(int checkButton, int &framesHeld, int framesHeldThreshold, int framesHeldRepeatRate)
 {
-	bool btnWasHeldLastFrame = (lastButtons & checkButton) && (__CtrlPeekButtons() & checkButton);
+	bool btnWasHeldLastFrame = (lastButtons & checkButton) && ((psp::host::dialogUsesController() ? psp::host::g_ctrl.buttons.load() : 0u) & checkButton);
 	if (!IsFadingOut() && btnWasHeldLastFrame) {
 		framesHeld++;
 	}
@@ -357,22 +328,6 @@ bool PSPDialog::IsButtonHeld(int checkButton, int &framesHeld, int framesHeldThr
 	return false;
 }
 
-PPGeStyle PSPDialog::FadedStyle(PPGeAlign align, float scale) {
-	PPGeStyle textStyle;
-	textStyle.align = align;
-	textStyle.scale = scale;
-	textStyle.color = CalcFadedColor(textStyle.color);
-	textStyle.hasShadow = true;
-	textStyle.shadowColor = CalcFadedColor(textStyle.shadowColor);
-	return textStyle;
-}
-
-PPGeImageStyle PSPDialog::FadedImageStyle() {
-	PPGeImageStyle style;
-	style.color = CalcFadedColor(style.color);
-	return style;
-}
-
 void PSPDialog::DisplayButtons(int flags, std::string_view caption) {
 	bool useCaption = false;
 	char safeCaption[65] = {0};
@@ -381,29 +336,18 @@ void PSPDialog::DisplayButtons(int flags, std::string_view caption) {
 		truncate_cpy(safeCaption, sizeof(safeCaption), caption);
 	}
 
-	PPGeStyle textStyle = FadedStyle(PPGeAlign::BOX_LEFT, FONT_SCALE);
-
-	auto di = GetI18NCategory(I18NCat::DIALOG);
-	float x1 = 183.5f, x2 = 261.5f;
-
 	const pspUtilityDialogCommon *commonParams = GetCommonParam();
 	if (!commonParams) {
 		return;
 	}
 
-	if (commonParams->buttonSwap == 1) {
-		x1 = 261.5f;
-		x2 = 183.5f;
-	}
 	if (flags & DS_BUTTON_OK) {
-		std::string_view text = useCaption ? safeCaption : di->T("Enter");
-		PPGeDrawImage(okButtonImg, x2, 256, 11.5f, 11.5f, textStyle);
-		PPGeDrawText(text, x2 + 14.5f, 252, textStyle);
+		view_.confirmButton = true;
+		view_.confirmLabel = useCaption ? safeCaption : "Enter";
 	}
 	if (flags & DS_BUTTON_CANCEL) {
-		std::string_view text = useCaption ? safeCaption : di->T("Back");
-		PPGeDrawImage(cancelButtonImg, x1, 256, 11.5f, 11.5f, textStyle);
-		PPGeDrawText(text, x1 + 14.5f, 252, textStyle);
+		view_.cancelButton = true;
+		view_.cancelLabel = useCaption ? safeCaption : "Back";
 	}
 }
 
@@ -422,141 +366,20 @@ int PSPDialog::CheckRequest(u32 addr, std::initializer_list<u32> sizes) {
 }
 
 int PSPDialog::GetConfirmButton() {
-	if (PSP_CoreParameter().compat.flags().ForceCircleButtonConfirm) {
-		return CTRL_CIRCLE;
-	}
 	return g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? CTRL_CROSS : CTRL_CIRCLE;
 }
 
 int PSPDialog::GetCancelButton() {
-	if (PSP_CoreParameter().compat.flags().ForceCircleButtonConfirm) {
-		return CTRL_CROSS;
-	}
 	return g_Config.iButtonPreference == PSP_SYSTEMPARAM_BUTTON_CROSS ? CTRL_CIRCLE : CTRL_CROSS;
 }
 
-void PSPDialog::DisplayMessage2(std::string_view text1, std::string_view text2a, std::string_view text2b, std::string_view text3a, std::string_view text3b, bool hasYesNo, bool hasOK) {
-	auto di = GetI18NCategory(I18NCat::DIALOG);
+PPGeImage::PPGeImage(const std::string &pspFilename) {
+	// PPSSPP loads the PNG when the icon is first drawn; the bytes are the same.
+	if (pspFileSystem.ReadEntireFile(pspFilename, png_, true) < 0)
+		png_.clear();
+}
 
-	PPGeStyle buttonStyle = FadedStyle(PPGeAlign::BOX_CENTER, FONT_SCALE);
-	PPGeStyle messageStyle = FadedStyle(PPGeAlign::BOX_HCENTER, FONT_SCALE);
-	PPGeStyle messageStyleRight = FadedStyle(PPGeAlign::BOX_RIGHT, FONT_SCALE);
-	PPGeStyle messageStyleLeft = FadedStyle(PPGeAlign::BOX_LEFT, FONT_SCALE);
-
-	std::string text2 = std::string(text2a) + "  " + std::string(text2b);
-	std::string text3 = std::string(text3a) + "  " + std::string(text3b);
-
-	// Without the scrollbar, we have 350 total pixels.
-	float WRAP_WIDTH = 300.0f;
-	if (UTF8StringNonASCIICount(text1) >= (int)text1.size() / 4) {
-		WRAP_WIDTH = 336.0f;
-		if (text1.size() > 12) {
-			messageStyle.scale = 0.6f;
-		}
-	}
-
-	float totalHeight1 = 0.0f;
-	PPGeMeasureText(nullptr, &totalHeight1, text1, FONT_SCALE, PPGE_LINE_WRAP_WORD, WRAP_WIDTH);
-	float totalHeight2 = 0.0f;
-	if (text2 != "  ")
-		PPGeMeasureText(nullptr, &totalHeight2, text2, FONT_SCALE, PPGE_LINE_USE_ELLIPSIS, WRAP_WIDTH);
-	float totalHeight3 = 0.0f;
-	if (text3 != "  ")
-		PPGeMeasureText(nullptr, &totalHeight3, text3, FONT_SCALE, PPGE_LINE_USE_ELLIPSIS, WRAP_WIDTH);
-	float marginTop = 0.0f;
-	if (text2 != "  " || text3 != "  ")
-		marginTop = 11.0f;
-	float totalHeight = totalHeight1 + totalHeight2 + totalHeight3 + marginTop;
-	// The PSP normally only shows about 8 lines at a time.
-	// For improved UX, we intentionally show part of the next line.
-	float visibleHeight = std::min(totalHeight, 175.0f);
-	float h2 = visibleHeight / 2.0f;
-
-	float centerY = 135.0f;
-	float sy = centerY - h2 - 15.0f;
-	float ey = centerY + h2 + 20.0f;
-	float buttonY = centerY + h2 + 5.0f;
-
-	auto drawSelectionBoxAndAdjust = [&](float x) {
-		// Box has a fixed size.
-		float w = 15.0f;
-		float h = 8.0f;
-		PPGeDrawRect(x - w, buttonY - h, x + w, buttonY + h, CalcFadedColor(0x6DCFCFCF));
-
-		centerY -= h + 5.0f;
-		sy -= h + 5.0f;
-		ey = buttonY + h * 2.0f + 5.0f;
-	};
-
-	if (hasYesNo) {
-		if (yesnoChoice == 1) {
-			drawSelectionBoxAndAdjust(204.0f);
-		} else {
-			drawSelectionBoxAndAdjust(273.0f);
-		}
-
-		PPGeDrawText(di->T("Yes"), 203.0f, buttonY - 1.0f, buttonStyle);
-		PPGeDrawText(di->T("No"), 272.0f, buttonY - 1.0f, buttonStyle);
-		if (IsButtonPressed(CTRL_LEFT) && yesnoChoice == 0) {
-			yesnoChoice = 1;
-		} else if (IsButtonPressed(CTRL_RIGHT) && yesnoChoice == 1) {
-			yesnoChoice = 0;
-		}
-		buttonY += 8.0f + 5.0f;
-	}
-
-	if (hasOK) {
-		drawSelectionBoxAndAdjust(240.0f);
-
-		PPGeDrawText(di->T("OK"), 239.0f, buttonY - 1.0f, buttonStyle);
-		buttonY += 8.0f + 5.0f;
-	}
-
-	PPGeScissor(0, (int)(centerY - h2 - 2), 480, (int)(centerY + h2 + 2));
-	PPGeDrawTextWrapped(text1, 240.0f, centerY - h2 - scrollPos_, WRAP_WIDTH, 0, messageStyle);
-	if (!text2a.empty()) {
-		if (!text2b.empty())
-			PPGeDrawTextWrapped(text2a, 240.0f - 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + marginTop, WRAP_WIDTH, 0, messageStyleRight);
-		else
-			PPGeDrawTextWrapped(text2a, 240.0f, centerY - h2 - scrollPos_ + totalHeight1 + marginTop, WRAP_WIDTH, 0, messageStyle);
-	}
-	if (!text2b.empty())
-		PPGeDrawTextWrapped(text2b, 240.0f + 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + marginTop, WRAP_WIDTH, 0, messageStyleLeft);
-	if (!text3a.empty()) {
-		if (!text3b.empty())
-			PPGeDrawTextWrapped(text3a, 240.0f - 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + totalHeight2 + marginTop, WRAP_WIDTH, 0, messageStyleRight);
-		else
-			PPGeDrawTextWrapped(text3a, 240.0f, centerY - h2 - scrollPos_ + totalHeight1 + totalHeight2 + marginTop, WRAP_WIDTH, 0, messageStyle);
-	}
-	if (!text3b.empty())
-		PPGeDrawTextWrapped(text3b, 240.0f + 5.0f, centerY - h2 - scrollPos_ + totalHeight1 + totalHeight2 + marginTop, WRAP_WIDTH, 0, messageStyleLeft);
-	PPGeScissorReset();
-
-	// Do we need a scrollbar?
-	if (visibleHeight < totalHeight) {
-		float scrollSpeed = 5.0f;
-		float scrollMax = totalHeight - visibleHeight;
-
-		float bobHeight = (visibleHeight / totalHeight) * visibleHeight;
-		float bobOffset = (scrollPos_ / scrollMax) * (visibleHeight - bobHeight);
-		float bobY1 = centerY - h2 + bobOffset;
-		PPGeDrawRect(415.0f, bobY1, 420.0f, bobY1 + bobHeight, CalcFadedColor(0xFFCCCCCC));
-
-		auto buttonDown = [this](int btn, int& held) {
-			if (IsButtonPressed(btn)) {
-				held = 0;
-				return true;
-			}
-			return IsButtonHeld(btn, held, 1, 1);
-		};
-		if (buttonDown(CTRL_DOWN, framesDownHeld_) && scrollPos_ < scrollMax) {
-			scrollPos_ = std::min(scrollMax, scrollPos_ + scrollSpeed);
-		}
-		if (buttonDown(CTRL_UP, framesUpHeld_) && scrollPos_ > 0.0f) {
-			scrollPos_ = std::max(0.0f, scrollPos_ - scrollSpeed);
-		}
-	}
-
-	PPGeDrawRect(60.0f, sy, 420.0f, sy + 1.0f, CalcFadedColor(0xFFFFFFFF));
-	PPGeDrawRect(60.0f, ey, 420.0f, ey + 1.0f, CalcFadedColor(0xFFFFFFFF));
+PPGeImage::PPGeImage(u32 pngPointer, size_t pngSize) {
+	if (pngSize && Memory::IsValidRange(pngPointer, (u32)pngSize))
+		png_.assign(Memory::GetPointerUnchecked(pngPointer), Memory::GetPointerUnchecked(pngPointer) + pngSize);
 }

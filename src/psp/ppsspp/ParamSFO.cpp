@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: disc ID / fake ID / region helpers removed (savedata only uses the
+// SFO reader and writer).
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -19,14 +21,7 @@
 #include <cstdio>
 #include <cstring>
 
-#include "Common/CommonTypes.h"
-#include "Common/Log.h"
-#include "Common/StringUtils.h"
-#include "Common/Swap.h"
-#include "Common/File/Path.h"
-#include "Core/ELF/ParamSFO.h"
-#include "Core/System.h"
-#include "Core/Util/PathUtil.h"
+#include "ParamSFO.h"
 
 struct Header
 {
@@ -103,21 +98,6 @@ std::vector<std::string> ParamSFOData::GetKeys() const {
 		result.push_back(pair.first);
 	}
 	return result;
-}
-
-std::string ParamSFOData::GetDiscID() {
-	const std::string rawDiscID = GetValueString("DISC_ID");
-	const std::string discID(StripSpaces(rawDiscID));
-	if (discID.empty()) {
-		std::string fakeID = GenerateFakeID(Path());
-		WARN_LOG(Log::Loader, "No DiscID found - generating a fake one: '%s' (from %s)", fakeID.c_str(), PSP_CoreParameter().fileToStart.c_str());
-		ValueData data;
-		data.type = VT_UTF8;
-		data.s_value = fakeID;
-		values["DISC_ID"] = data;
-		return fakeID;
-	}
-	return discID;
 }
 
 int ParamSFOData::VersionToInt(std::string_view version) {
@@ -219,14 +199,6 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size) {
 		default:
 			break;
 		}
-	}
-
-	// The disc ID names host files and directories (configs, cheats, textures, savestates, updates),
-	// so one that could escape them is treated as missing.
-	const std::string discID(StripSpaces(GetValueString("DISC_ID")));
-	if (!discID.empty() && !IsSafePathComponent(discID)) {
-		WARN_LOG(Log::Loader, "Ignoring unsafe DISC_ID in PARAM.SFO: '%s'", discID.c_str());
-		values.erase("DISC_ID");
 	}
 
 	return true;
@@ -383,122 +355,4 @@ void ParamSFOData::WriteSFO(u8 **paramsfo, size_t *size) const {
 
 void ParamSFOData::Clear() {
 	values.clear();
-}
-
-std::string ParamSFOData::GenerateFakeID(const Path &filename) const {
-	// Generates fake gameID for homebrew based on it's folder name.
-	// Should probably not be a part of ParamSFO, but it'll be called in same places.
-	// FileToStart here is actually a directory name, not a file, so taking GetFilename on it gets what we want.
-	Path path = PSP_CoreParameter().fileToStart;
-	if (!filename.empty())
-		path = filename;
-
-	std::string file = path.GetFilename();
-
-	// Deliberately byte-wise and ASCII-only. Filenames are UTF-8, and a plain char is signed on x86
-	// and unsigned on ARM - so summing chars directly gave Windows and Android different IDs for the
-	// same non-ASCII folder name, and toupper() on a negative value trips MSVC's debug CRT. ASCII
-	// names, which is very nearly all of them, produce exactly the same ID as before either way.
-	int sumOfAllLetters = 0;
-	for (char &c : file) {
-		sumOfAllLetters += (unsigned char)c;
-		// Get rid of some garbage characters than can arise when opening content URIs. Well, I've only seen '%', but...
-		if (c && strchr("%() []", c) != nullptr) {
-			c = 'X';
-		} else if (c >= 'a' && c <= 'z') {
-			c = c - 'a' + 'A';
-		}
-	}
-
-	if (file.size() < 4) {
-		file += "HOME";
-	}
-	file = file.substr(0, 4);
-
-	std::string fakeID = file + StringFromFormat("%05d", sumOfAllLetters);
-	return fakeID;
-}
-
-GameRegion DetectGameRegionFromID(std::string_view id_full) {
-	if (id_full == "MSTKUPDATE") {
-		return GameRegion::FIRMWARE;
-	}
-
-	// DISC_ID format consists of a 4-letter categorization followed by a 5-digit catalog number.
-	if (id_full.size() == 9 || (id_full.size() == 10 && id_full[4] == '-')) {
-		std::string_view id_letters = id_full.substr(0, 4);
-		std::string_view id_release_type = id_letters.substr(0, 2);
-
-		// Determine the type of release from the first two letters, must be one of the following:
-		//   "UC" -> (U)MD, (C)opyrighted (first-party)
-		//   "UL" -> (U)MD, (L)icensed (third-party)
-		//   "NP" -> PlayStation (N)etwork, (P)roduction environment (digital download)
-		if (id_release_type == "UL" || id_release_type == "UC" || id_release_type == "NP") {
-			// Determine the region from the third letter.
-			// This isn't super accurate but it's all we have.
-			switch (id_letters[2]) {
-			case 'E': return GameRegion::EUROPE; break;
-			case 'U': return GameRegion::USA; break;
-			case 'J': return GameRegion::JAPAN; break;
-			case 'K': return GameRegion::KOREA; break;
-			case 'A': return GameRegion::ASIA; break;
-			default:
-				if (id_letters.substr(0, 3) == "NPH") {
-					return GameRegion::HONGKONG; // All games in this region are PSN.
-				} else if (id_letters == "NPIA") {
-					return GameRegion::INTERNAL;
-				} else {
-					return GameRegion::HOMEBREW;
-				}
-			}
-			/* The fourth letter could be used to determine the type of product. It isn't useful to us.
-			 * UMD:
-			 *   'S' -> full (S)oftware? (used by most games)
-			 *   'M' -> (M)edia? (used by some Japanese and Korean games)
-			 *   'B' -> (B)undled
-			 *   'D' -> (D)emo
-			 *   'P' -> (P)re-production
-			 *   'T' -> (T)est
-			 *   'X' -> e(X)perimental?
-			 * Digital:
-			 *   'A' -> first-party application
-			 *   'B' -> third-party PSP Remasters
-			 *   'E' -> first-party PAL PSOne
-			 *   'F' -> third-party PAL PSOne / American PC Engine (TurboGrafx-16 Classics)
-			 *   'G' -> first-party PSP / PlayView
-			 *   'H' -> third-party PSP / PlayView / Neo Geo
-			 *   'I' -> first-party NTSC PSOne
-			 *   'J' -> third-party NTSC PSOne / Japanese PC Engine
-			 *   'W' -> first-party tool?
-			 *   'X' -> first-party Minis
-			 *   'Z' -> third-party Minis
-			 */
-		// Misc patterns
-		} else if (id_letters == "UTST") {
-			return GameRegion::TEST;
-		} else if (id_letters == "UMDT") {
-			return GameRegion::DIAGNOSTIC;
-		} else if (id_letters == "VSHM") {  // this is just generated from vshmain.elf
-			return GameRegion::FIRMWARE;
-		}
-	}
-	return GameRegion::HOMEBREW;
-}
-
-std::string_view GameRegionToString(GameRegion region) {
-	switch (region) {
-	case GameRegion::JAPAN: return "Japan";
-	case GameRegion::USA: return "USA";
-	case GameRegion::EUROPE: return "Europe";
-	case GameRegion::HONGKONG: return "Hong Kong";
-	case GameRegion::ASIA: return "Asia";
-	case GameRegion::KOREA: return "Korea";
-	case GameRegion::HOMEBREW: return "Homebrew";
-	case GameRegion::INTERNAL: return "Internal";
-	case GameRegion::TEST: return "Test disc";
-	case GameRegion::DIAGNOSTIC: return "Diagnostic tool";
-	case GameRegion::FIRMWARE: return "Firmware update";
-	case GameRegion::VSH: return "VSH";
-	default: return "unknown region";
-	}
 }

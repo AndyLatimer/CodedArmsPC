@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: PPGe drawing replaced by the host dialog view (DisplayMessage fills
+// the text and choices), English strings of PPSSPP's i18n defaults, save states removed.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -17,20 +19,8 @@
 
 #include <algorithm>
 
-#include "Common/Serialize/Serializer.h"
-#include "Common/Serialize/SerializeFuncs.h"
-#include "Common/StringUtils.h"
-#include "Core/Dialog/PSPMsgDialog.h"
-#include "Core/Dialog/PSPSaveDialog.h"
-#include "Core/Util/PPGeDraw.h"
-#include "Core/HLE/ErrorCodes.h"
-#include "Core/HLE/sceCtrl.h"
-#include "Core/MemMapHelpers.h"
-#include "Core/Reporting.h"
-#include "Core/Compatibility.h"
-#include "Core/System.h"
-#include "Common/Data/Text/I18n.h"
-#include "Common/Data/Encoding/Utf8.h"
+#include "PSPMsgDialog.h"
+#include "PSPSaveDialog.h"
 
 static const float FONT_SCALE = 0.65f;
 
@@ -46,7 +36,8 @@ PSPMsgDialog::~PSPMsgDialog() {
 }
 
 bool PSPMsgDialog::UseAutoStatus() {
-	return PSP_CoreParameter().compat.flags().MsgDialogAutoStatus;
+	// compat.ini MsgDialogAutoStatus: not set for this game.
+	return false;
 }
 
 int PSPMsgDialog::Init(unsigned int paramAddr) {
@@ -160,11 +151,9 @@ int PSPMsgDialog::Init(unsigned int paramAddr) {
 
 
 void PSPMsgDialog::FormatErrorCode(uint32_t code) {
-	auto err = GetI18NCategory(I18NCat::DIALOG);
-
 	switch (code) {
 	case SCE_UTILITY_SAVEDATA_ERROR_LOAD_DATA_BROKEN:
-		snprintf(msgText, 512, "%s (%08x)", err->T_cstr("MsgErrorSavedataDataBroken", "Save data was corrupt."), code);
+		snprintf(msgText, 512, "%s (%08x)", "Save data was corrupt.", code);
 		break;
 
 	case SCE_UTILITY_SAVEDATA_ERROR_LOAD_NO_MS:
@@ -172,119 +161,40 @@ void PSPMsgDialog::FormatErrorCode(uint32_t code) {
 	case SCE_UTILITY_SAVEDATA_ERROR_SAVE_NO_MS:
 	case SCE_UTILITY_SAVEDATA_ERROR_DELETE_NO_MS:
 	case SCE_UTILITY_SAVEDATA_ERROR_SIZES_NO_MS:
-		snprintf(msgText, 512, "%s (%08x)", err->T_cstr("MsgErrorSavedataNoMS", "Memory stick not inserted."), code);
+		snprintf(msgText, 512, "%s (%08x)", "Memory stick not inserted.", code);
 		break;
 
 	case SCE_UTILITY_SAVEDATA_ERROR_LOAD_NO_DATA:
 	case SCE_UTILITY_SAVEDATA_ERROR_RW_NO_DATA:
 	case SCE_UTILITY_SAVEDATA_ERROR_DELETE_NO_DATA:
 	case SCE_UTILITY_SAVEDATA_ERROR_SIZES_NO_DATA:
-		snprintf(msgText, 512, "%s (%08x)", err->T_cstr("MsgErrorSavedataNoData", "Warning: no save data was found."), code);
+		snprintf(msgText, 512, "%s (%08x)", "Warning: no save data was found.", code);
 		break;
 
 	case SCE_UTILITY_SAVEDATA_ERROR_RW_MEMSTICK_FULL:
 	case SCE_UTILITY_SAVEDATA_ERROR_SAVE_MS_NOSPACE:
-		snprintf(msgText, 512, "%s (%08x)", err->T_cstr("MsgErrorSavedataMSFull", "Memory stick full.  Check your storage space."), code);
+		snprintf(msgText, 512, "%s (%08x)", "Memory stick full.  Check your storage space.", code);
 		break;
 
 	default:
-		snprintf(msgText, 512, "%s %08x", err->T_cstr("MsgErrorCode", "Error code:"), code);
+		snprintf(msgText, 512, "%s %08x", "Error code:", code);
 	}
 }
 
 void PSPMsgDialog::DisplayMessage(const std::string &text, bool hasYesNo, bool hasOK) {
-	auto di = GetI18NCategory(I18NCat::DIALOG);
-
-	PPGeStyle buttonStyle = FadedStyle(PPGeAlign::BOX_CENTER, FONT_SCALE);
-	PPGeStyle messageStyle = FadedStyle(PPGeAlign::BOX_HCENTER, FONT_SCALE);
-
-	// Without the scrollbar, we have 390 total pixels.
-	float WRAP_WIDTH = 340.0f;
-	if ((size_t)UTF8StringNonASCIICount(text) >= text.size() / 4) {
-		WRAP_WIDTH = 376.0f;
-		if (text.size() > 12) {
-			messageStyle.scale = 0.6f;
-		}
-	}
-
-	float totalHeight = 0.0f;
-	PPGeMeasureText(nullptr, &totalHeight, text, FONT_SCALE, PPGE_LINE_WRAP_WORD, WRAP_WIDTH);
-	// The PSP normally only shows about 8 lines at a time.
-	// For improved UX, we intentionally show part of the next line.
-	float visibleHeight = std::min(totalHeight, 175.0f);
-	float h2 = visibleHeight / 2.0f;
-
-	float centerY = 135.0f;
-	float sy = centerY - h2 - 15.0f;
-	float ey = centerY + h2 + 20.0f;
-	float buttonY = centerY + h2 + 5.0f;
-
-	auto drawSelectionBoxAndAdjust = [&](float x) {
-		// Box has a fixed size.
-		float w = 15.0f;
-		float h = 8.0f;
-		PPGeDrawRect(x - w, buttonY - h, x + w, buttonY + h, CalcFadedColor(0x6DCFCFCF));
-
-		centerY -= h + 5.0f;
-		sy -= h + 5.0f;
-		ey = buttonY + h * 2.0f + 5.0f;
-	};
-
+	view_.text = text;
 	if (hasYesNo) {
-		if (yesnoChoice == 1) {
-			drawSelectionBoxAndAdjust(204.0f);
-		} else {
-			drawSelectionBoxAndAdjust(273.0f);
-		}
-
-		PPGeDrawText(di->T("Yes"), 203.0f, buttonY - 1.0f, buttonStyle);
-		PPGeDrawText(di->T("No"), 272.0f, buttonY - 1.0f, buttonStyle);
+		view_.yesNo = true;
 		if (IsButtonPressed(CTRL_LEFT) && yesnoChoice == 0) {
 			yesnoChoice = 1;
 		} else if (IsButtonPressed(CTRL_RIGHT) && yesnoChoice == 1) {
 			yesnoChoice = 0;
 		}
-		buttonY += 8.0f + 5.0f;
-	} 
-	
+	}
 	if (hasOK) {
-		drawSelectionBoxAndAdjust(240.0f);
-
-		PPGeDrawText(di->T("OK"), 239.0f, buttonY - 1.0f, buttonStyle);
-		buttonY += 8.0f + 5.0f;
+		view_.ok = true;
 	}
-
-	PPGeScissor(0, (int)(centerY - h2 - 2), 480, (int)(centerY + h2 + 2));
-	PPGeDrawTextWrapped(text.c_str(), 240.0f, centerY - h2 - scrollPos_, WRAP_WIDTH, 0, messageStyle);
-	PPGeScissorReset();
-
-	// Do we need a scrollbar?
-	if (visibleHeight < totalHeight) {
-		float scrollSpeed = 5.0f;
-		float scrollMax = totalHeight - visibleHeight;
-
-		float bobHeight = (visibleHeight / totalHeight) * visibleHeight;
-		float bobOffset = (scrollPos_ / scrollMax) * (visibleHeight - bobHeight);
-		float bobY1 = centerY - h2 + bobOffset;
-		PPGeDrawRect(435.0f, bobY1, 440.0f, bobY1 + bobHeight, CalcFadedColor(0xFFCCCCCC));
-
-		auto buttonDown = [this](int btn, int &held) {
-			if (IsButtonPressed(btn)) {
-				held = 0;
-				return true;
-			}
-			return IsButtonHeld(btn, held, 1, 1);
-		};
-		if (buttonDown(CTRL_DOWN, framesDownHeld_) && scrollPos_ < scrollMax) {
-			scrollPos_ = std::min(scrollMax, scrollPos_ + scrollSpeed);
-		}
-		if (buttonDown(CTRL_UP, framesUpHeld_) && scrollPos_ > 0.0f) {
-			scrollPos_ = std::max(0.0f, scrollPos_ - scrollSpeed);
-		}
-	}
-
-	PPGeDrawRect(40.0f, sy, 440.0f, sy + 1.0f, CalcFadedColor(0xFFFFFFFF));
-	PPGeDrawRect(40.0f, ey, 440.0f, ey + 1.0f, CalcFadedColor(0xFFFFFFFF));
+	view_.yesNoChoice = yesnoChoice;
 }
 
 int PSPMsgDialog::Update(int animSpeed) {
@@ -304,12 +214,6 @@ int PSPMsgDialog::Update(int animSpeed) {
 		UpdateFade(animSpeed);
 
 		StartDraw();
-		// white -> RGB(168,173,189), black -> RGB(129,134,150)
-		// (255 - a) + (x * a / 255) = 173,  x * a / 255 = 134
-		// a = 255 - w + b = 158, x = b * 255 / a = ?
-		// but is not drawn using x * a + y * (255 - a) here?
-		//PPGeDrawRect(0, 0, 480, 272, CalcFadedColor(0x9EF2D8D0));
-		PPGeDrawRect(0, 0, 480, 272, CalcFadedColor(0xC0C8B2AC));
 
 		if ((flag & DS_MSG) || (flag & DS_ERRORMSG))
 			DisplayMessage(msgText, (flag & DS_YESNO) != 0, (flag & DS_OK) != 0);
@@ -373,33 +277,6 @@ int PSPMsgDialog::Shutdown(bool force) {
 	}
 
 	return 0;
-}
-
-void PSPMsgDialog::DoState(PointerWrap &p)
-{
-	PSPDialog::DoState(p);
-
-	auto s = p.Section("PSPMsgDialog", 1, 2);
-	if (!s)
-		return;
-
-	Do(p, flag);
-	if (s >= 2) {
-		Do(p, framesRun_);
-	} else {
-		framesRun_ = 8;
-	}
-	Do(p, messageDialog);
-	Do(p, messageDialogAddr);
-	DoCString(p, msgText);
-	Do(p, yesnoChoice);
-
-	// We don't save state this, you'll just have to scroll down again.
-	if (p.mode == p.MODE_READ) {
-		scrollPos_ = 0.0f;
-		framesUpHeld_ = 0;
-		framesDownHeld_ = 0;
-	}
 }
 
 pspUtilityDialogCommon *PSPMsgDialog::GetCommonParam()

@@ -1,4 +1,6 @@
 // Copyright (c) 2012- PPSSPP Project.
+// Modified for CodedArmsPC: drawing replaced by the host dialog view, the IO action runs
+// synchronously when started (instead of on a host thread), save states removed.
 
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -22,8 +24,8 @@
 #include <thread>
 #include <mutex>
 
-#include "Core/Dialog/PSPDialog.h"
-#include "Core/Dialog/SavedataParam.h"
+#include "PSPDialog.h"
+#include "SavedataParam.h"
 
 class PSPSaveDialog : public PSPDialog {
 public:
@@ -33,7 +35,6 @@ public:
 	int Init(int paramAddr);
 	int Update(int animSpeed) override;
 	int Shutdown(bool force = false) override;
-	void DoState(PointerWrap &p) override;
 	pspUtilityDialogCommon *GetCommonParam() override;
 	// Waits for the IO thread, if any, to be done with PSP memory. Its results are still taken as usual.
 	void WaitForIO();
@@ -51,6 +52,7 @@ private:
 	void DisplaySaveDataInfo2(bool showNewData = false);
 	void DisplayMessage(std::string_view text, bool hasYesNo = false);
 	std::string GetSelectedSaveDirName() const;
+	psp::host::DialogSaveEntry EntryFromInfo(const SaveFileInfo &info) const;
 
 	void StartIOThread();
 	bool FinishIO(bool wait);
