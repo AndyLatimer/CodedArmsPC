@@ -39,13 +39,17 @@ El código generado se crea en `build/` a partir de la ISO del usuario y nunca s
 - [x] [NUEVO] Audio por SDL mezclando los canales sceAudio del juego.
 - [x] Compilación de Windows (`CodedArms.exe`, MinGW) probada con Wine: arranque, logo y vídeo.
 
+### Controles modernos y pantalla
+- [x] [RE] **Apuntado directo con ratón y stick derecho**: hook del recompilador en la actualización de la vista del jugador (yaw `view+0x51C`, pitch `view+0x524`, límite del propio juego); sensibilidad X/Y, inversión, zona muerta, curva. Verificado en la misión de entrenamiento.
+- [x] [NUEVO] **Panorámico Hor+** (21:9, 32:9…): la escena 3D se amplía a los lados, el HUD queda centrado, los fundidos/fondos a pantalla completa se estiran, los vídeos van centrados. Verificado a 21:9.
+- [x] Corrección: el alfa del framebuffer de la PSP es el stencil (solo lo cambian ZERO/REPLACE): el brillo (glow) de la misión coincide con PPSSPP.
+
 ### Herramientas
+- [x] Recompilador: hooks del port (`tools/recomp/hooks_ULES00124.tsv`) y puntos de vigilancia de escrituras (`-DCA_RECOMP_WATCH`).
 - [x] `ca_psprun`: ejecución sin ventana o con GL oculto (`--gl --shot`), captura de audio (`--wav`), pulsaciones programadas (`--press`) y control interactivo por FIFO (`--control`: press/hold/stick/shot/gpudump/maxdraw).
 - [x] Oráculo: PPSSPP headless (renderizador por software) para comparar capturas y audio.
 
 ## Pendiente (siguiente)
-- [ ] [RE] **Apuntado con ratón real**: localizar las variables de cámara (yaw/pitch) del jugador en la memoria del juego y escribirlas directamente (ahora el ratón emula los botones de mirar).
-- [ ] [RE] **Panorámico 16:9 / ultrapanorámico**: ampliar el FOV horizontal (Hor+) parcheando la proyección y ajustar el HUD.
 - [ ] [NUEVO] Dibujar los diálogos del sistema (guardar/cargar/mensajes) en el front end (la interfaz `host_dialog` ya existe).
 - [ ] [NUEVO] Menú de opciones del port (resolución, controles, sensibilidad X/Y, inversión, vibración).
 - [ ] [NUEVO] Contexto de controles: menús con ratón/teclado (Intro/Esc) frente a juego.

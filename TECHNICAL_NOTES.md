@@ -213,3 +213,13 @@ recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
 - Framebuffers: un FBO por dirección de VRAM, a escala N; fila 0 de la PSP = y 0 de GL. Un framebuffer mostrado sin dibujos de la GE se toma de memoria solo si su hash cambió (la GE nunca escribe en la RAM): el juego dibuja en un búfer mientras muestra el otro.
 - Coded Arms construye la geometría de los niveles con parches bezier/spline: sin teselarlos solo se ven el suelo, los objetos y el arma.
 - Esquema de control del juego (tipo A, leído de la pantalla de configuración): stick = mover; △/×/□/○ = mirar arriba/abajo/girar izquierda/derecha; ↑ zoom; ↓ recargar; ←/→ arma anterior/siguiente; R disparar; L saltar; SELECT pausa; START mapa.
+
+## 13. Vista del jugador y apuntado con ratón  ✅ verificado
+- Encontrado con el build de vigilancia de escrituras (`-DCA_RECOMP_WATCH`, `CA_WATCH_ADDR`): la función `0x0889ba9c(view, input, ...)` actualiza cada fotograma la vista del jugador (en la misión de entrenamiento `view = 0x08F71570`).
+- `view+0x51C`: yaw (rad), integrado como `yaw -= input[+0x78] × factor` y normalizado; `view+0x524`: pitch (rad), integrado desde `input[+0x79]` y limitado a ±1,309 rad (`0x3FA78D37`, en `0x0889bfb8`); `view+0x14`/`+0x10` reciben copias.
+- La función se llama 4 veces por fotograma con estructuras de entrada distintas; el hook (`game_hooks.cpp`, tras `0x0889bad4`) aplica el giro acumulado una sola vez.
+- Esquema A del juego y por qué el ratón ya no emula botones: ver §12.
+
+## 14. Alfa del framebuffer y glow
+- En la PSP el canal alfa del framebuffer es el stencil: dibujar no lo modifica salvo con operaciones de stencil (PPSSPP `GPUStateUtils`); ZERO/REPLACE escriben 0/ref.
+- La misión usa stencil ALWAYS con ZERO para la geometría normal y REPLACE (ref 255) para luces y neones; un pase de glow reduce la pantalla (con su alfa como máscara) a 128×64 y la suma de vuelta. Escribir el alfa del fragmento convertía el HUD en recuadros blancos.
