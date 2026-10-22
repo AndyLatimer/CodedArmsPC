@@ -74,6 +74,84 @@ typedef ptrdiff_t GLintptr;
 #define GL_LINK_STATUS 0x8B82
 #define GL_INFO_LOG_LENGTH 0x8B84
 
+#define GL_FRAMEBUFFER 0x8D40
+#define GL_UNIFORM_BUFFER 0x8A11
+#define GL_STREAM_READ 0x88E1
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#define GL_RENDERBUFFER 0x8D41
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
+#define GL_DEPTH24_STENCIL8 0x88F0
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define GL_RGBA8 0x8058
+#define GL_STENCIL_BUFFER_BIT 0x00000400
+#define GL_SCISSOR_TEST 0x0C11
+#define GL_STENCIL_TEST 0x0B90
+#define GL_COLOR_LOGIC_OP 0x0BF2
+#define GL_DEPTH_CLAMP 0x864F
+#define GL_NEVER 0x0200
+#define GL_EQUAL 0x0202
+#define GL_GREATER 0x0204
+#define GL_NOTEQUAL 0x0205
+#define GL_GEQUAL 0x0206
+#define GL_ALWAYS 0x0207
+#define GL_ZERO 0
+#define GL_ONE 1
+#define GL_SRC_COLOR 0x0300
+#define GL_ONE_MINUS_SRC_COLOR 0x0301
+#define GL_DST_ALPHA 0x0304
+#define GL_ONE_MINUS_DST_ALPHA 0x0305
+#define GL_DST_COLOR 0x0306
+#define GL_ONE_MINUS_DST_COLOR 0x0307
+#define GL_CONSTANT_COLOR 0x8001
+#define GL_ONE_MINUS_CONSTANT_COLOR 0x8002
+#define GL_FUNC_ADD 0x8006
+#define GL_FUNC_SUBTRACT 0x800A
+#define GL_FUNC_REVERSE_SUBTRACT 0x800B
+#define GL_MIN 0x8007
+#define GL_MAX 0x8008
+#define GL_KEEP 0x1E00
+#define GL_REPLACE 0x1E01
+#define GL_INCR 0x1E02
+#define GL_DECR 0x1E03
+#define GL_INVERT 0x150A
+#define GL_TRIANGLE_STRIP 0x0005
+#define GL_TRIANGLE_FAN 0x0006
+#define GL_POINTS 0x0000
+#define GL_LINE_STRIP 0x0003
+#define GL_UNSIGNED_SHORT 0x1403
+#define GL_UNSIGNED_INT 0x1405
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#define GL_MIRRORED_REPEAT 0x8370
+#define GL_TEXTURE_MAX_LEVEL 0x813D
+#define GL_TEXTURE_BASE_LEVEL 0x813C
+#define GL_TEXTURE_MIN_LOD 0x813A
+#define GL_TEXTURE_MAX_LOD 0x813B
+#define GL_TEXTURE_LOD_BIAS 0x8501
+#define GL_NEAREST_MIPMAP_LINEAR 0x2702
+#define GL_LAST_VERTEX_CONVENTION 0x8E4E
+#define GL_FIRST_VERTEX_CONVENTION 0x8E4D
+#define GL_PROGRAM_POINT_SIZE 0x8642
+#define GL_BACK_LEFT 0x0402
+#define GL_FRONT 0x0404
+#define GL_CLEAR 0x1500
+#define GL_AND 0x1501
+#define GL_AND_REVERSE 0x1502
+#define GL_COPY 0x1503
+#define GL_AND_INVERTED 0x1504
+#define GL_NOOP 0x1505
+#define GL_XOR 0x1506
+#define GL_OR 0x1507
+#define GL_NOR 0x1508
+#define GL_EQUIV 0x1509
+#define GL_OR_REVERSE 0x150B
+#define GL_COPY_INVERTED 0x150C
+#define GL_OR_INVERTED 0x150D
+#define GL_NAND 0x150E
+#define GL_SET 0x150F
+#define GL_FRAMEBUFFER_SRGB 0x8DB9
+
 #define CA_GL_FUNCS(X)                                                                          \
     X(const GLubyte*, glGetString, (GLenum name))                                               \
     X(const GLubyte*, glGetStringi, (GLenum name, GLuint index))                                \
@@ -129,6 +207,47 @@ typedef ptrdiff_t GLintptr;
     X(void, glBufferData, (GLenum t, GLsizeiptr s, const void* d, GLenum u))                    \
     X(void, glVertexAttribPointer, (GLuint i, GLint s, GLenum t, GLboolean n, GLsizei st, const void* p)) \
     X(void, glEnableVertexAttribArray, (GLuint i))                                              \
+    X(void, glGenFramebuffers, (GLsizei n, GLuint* f)) \
+    X(void, glDeleteFramebuffers, (GLsizei n, const GLuint* f)) \
+    X(void, glBindFramebuffer, (GLenum t, GLuint f)) \
+    X(void, glFramebufferTexture2D, (GLenum t, GLenum a, GLenum tt, GLuint tex, GLint l)) \
+    X(void, glFramebufferRenderbuffer, (GLenum t, GLenum a, GLenum rt, GLuint rb)) \
+    X(GLenum, glCheckFramebufferStatus, (GLenum t)) \
+    X(void, glGenRenderbuffers, (GLsizei n, GLuint* r)) \
+    X(void, glDeleteRenderbuffers, (GLsizei n, const GLuint* r)) \
+    X(void, glBindRenderbuffer, (GLenum t, GLuint r)) \
+    X(void, glRenderbufferStorage, (GLenum t, GLenum f, GLsizei w, GLsizei h)) \
+    X(void, glBlitFramebuffer, (GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0, GLint dx1, GLint dy1, GLbitfield m, GLenum f)) \
+    X(void, glScissor, (GLint x, GLint y, GLsizei w, GLsizei h)) \
+    X(void, glColorMask, (GLboolean r, GLboolean g, GLboolean b, GLboolean a)) \
+    X(void, glStencilFunc, (GLenum f, GLint ref, GLuint mask)) \
+    X(void, glStencilOp, (GLenum sf, GLenum zf, GLenum zp)) \
+    X(void, glStencilMask, (GLuint m)) \
+    X(void, glBlendFuncSeparate, (GLenum sr, GLenum dr, GLenum sa, GLenum da)) \
+    X(void, glBlendEquationSeparate, (GLenum rgb, GLenum a)) \
+    X(void, glBlendColor, (GLfloat r, GLfloat g, GLfloat b, GLfloat a)) \
+    X(void, glTexSubImage2D, (GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void* p)) \
+    X(void, glUniform2f, (GLint l, GLfloat a, GLfloat b)) \
+    X(void, glUniform1fv, (GLint l, GLsizei n, const GLfloat* v)) \
+    X(void, glUniform3fv, (GLint l, GLsizei n, const GLfloat* v)) \
+    X(void, glUniform4fv, (GLint l, GLsizei n, const GLfloat* v)) \
+    X(void, glUniform1iv, (GLint l, GLsizei n, const GLint* v)) \
+    X(void, glUniformMatrix3fv, (GLint l, GLsizei n, GLboolean t, const GLfloat* v)) \
+    X(void, glDrawElements, (GLenum m, GLsizei c, GLenum t, const void* i)) \
+    X(void, glBufferSubData, (GLenum t, GLintptr o, GLsizeiptr s, const void* d)) \
+    X(void, glClearDepth, (double d)) \
+    X(void, glClearStencil, (GLint s)) \
+    X(void, glLogicOp, (GLenum op)) \
+    X(void, glProvokingVertex, (GLenum m)) \
+    X(void, glReadBuffer, (GLenum m)) \
+    X(void, glDrawBuffer, (GLenum m)) \
+    X(void, glLineWidth, (GLfloat w)) \
+    X(void, glFinish, (void)) \
+    X(void, glFlush, (void)) \
+    X(void, glVertexAttribIPointer, (GLuint i, GLint s, GLenum t, GLsizei st, const void* p)) \
+    X(GLuint, glGetUniformBlockIndex, (GLuint p, const GLchar* n)) \
+    X(void, glUniformBlockBinding, (GLuint p, GLuint i, GLuint b)) \
+    X(void, glBindBufferBase, (GLenum t, GLuint i, GLuint b)) \
     X(void, glDrawArrays, (GLenum m, GLint first, GLsizei count))
 
 #define CA_GL_DECLARE(ret, name, args) typedef ret(CA_APIENTRY* PFN_##name) args; extern PFN_##name ca_##name;
@@ -190,6 +309,47 @@ CA_GL_FUNCS(CA_GL_DECLARE)
 #define glVertexAttribPointer ca_glVertexAttribPointer
 #define glEnableVertexAttribArray ca_glEnableVertexAttribArray
 #define glDrawArrays ca_glDrawArrays
+#define glGetUniformBlockIndex ca_glGetUniformBlockIndex
+#define glUniformBlockBinding ca_glUniformBlockBinding
+#define glBindBufferBase ca_glBindBufferBase
+#define glGenFramebuffers ca_glGenFramebuffers
+#define glDeleteFramebuffers ca_glDeleteFramebuffers
+#define glBindFramebuffer ca_glBindFramebuffer
+#define glFramebufferTexture2D ca_glFramebufferTexture2D
+#define glFramebufferRenderbuffer ca_glFramebufferRenderbuffer
+#define glCheckFramebufferStatus ca_glCheckFramebufferStatus
+#define glGenRenderbuffers ca_glGenRenderbuffers
+#define glDeleteRenderbuffers ca_glDeleteRenderbuffers
+#define glBindRenderbuffer ca_glBindRenderbuffer
+#define glRenderbufferStorage ca_glRenderbufferStorage
+#define glBlitFramebuffer ca_glBlitFramebuffer
+#define glScissor ca_glScissor
+#define glColorMask ca_glColorMask
+#define glStencilFunc ca_glStencilFunc
+#define glStencilOp ca_glStencilOp
+#define glStencilMask ca_glStencilMask
+#define glBlendFuncSeparate ca_glBlendFuncSeparate
+#define glBlendEquationSeparate ca_glBlendEquationSeparate
+#define glBlendColor ca_glBlendColor
+#define glTexSubImage2D ca_glTexSubImage2D
+#define glUniform2f ca_glUniform2f
+#define glUniform1fv ca_glUniform1fv
+#define glUniform3fv ca_glUniform3fv
+#define glUniform4fv ca_glUniform4fv
+#define glUniform1iv ca_glUniform1iv
+#define glUniformMatrix3fv ca_glUniformMatrix3fv
+#define glDrawElements ca_glDrawElements
+#define glBufferSubData ca_glBufferSubData
+#define glClearDepth ca_glClearDepth
+#define glClearStencil ca_glClearStencil
+#define glLogicOp ca_glLogicOp
+#define glProvokingVertex ca_glProvokingVertex
+#define glReadBuffer ca_glReadBuffer
+#define glDrawBuffer ca_glDrawBuffer
+#define glLineWidth ca_glLineWidth
+#define glFinish ca_glFinish
+#define glFlush ca_glFlush
+#define glVertexAttribIPointer ca_glVertexAttribIPointer
 
 namespace ca {
 // Loads every function above; returns false and names the first missing one on failure.

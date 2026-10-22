@@ -6,6 +6,7 @@
 // matches the PSP kernel (no time slicing between threads of equal priority; a thread
 // runs until it blocks or a higher-priority thread is woken).
 #include "psp/kernel.h"
+#include "psp/gpu/gpu.h"
 
 #include <algorithm>
 #include <atomic>
@@ -278,6 +279,11 @@ static void deliverInterrupts(std::unique_lock<std::mutex>& lk) {
     if (vcount > g_lastVblank) {
         g_lastVblank = vcount;
         g_pendingIntr.push_back({kIntrVblank, 0});
+        if (gpu::installed()) {
+            lk.unlock();
+            gpu::vblank();
+            lk.lock();
+        }
     }
     while (!g_queuedCalls.empty()) {
         QueuedCall qc = g_queuedCalls.front();

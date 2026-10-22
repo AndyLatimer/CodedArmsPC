@@ -73,7 +73,7 @@ void run(List& l) {
             }
             break;
         default:
-            if (g_renderer) g_renderer->command(pc, cmd, data, prev);
+            if (g_renderer) g_renderer->command(pc, cmd, data, prev, ((l.base | data) + l.offset) & 0x0FFFFFFF);
             break;
         }
     }

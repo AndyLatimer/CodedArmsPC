@@ -81,10 +81,16 @@ add_library(ca_psp OBJECT
   src/psp/ppsspp/SasReverb.cpp
   src/psp/hle_nids.cpp
   src/psp/ge.cpp
+  src/psp/gpu/gpu.cpp
+  src/psp/gpu/vertex_decoder.cpp
+  src/psp/gpu/texture_decoder.cpp
+  src/render/GL.cpp
   src/psp/ppsspp/InterpreterVFPU.cpp
   src/psp/ppsspp/MIPSVFPUUtils.cpp
 )
 target_include_directories(ca_psp PUBLIC src src/psp/ppsspp)
+target_include_directories(ca_psp SYSTEM PRIVATE third_party/stb)
+target_link_libraries(ca_psp PUBLIC SDL2::SDL2)
 target_compile_options(ca_psp PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wno-unused-function -Wno-sign-compare -Wno-missing-field-initializers>)
 find_package(Threads REQUIRED)
 
@@ -107,7 +113,8 @@ if(CA_GAME_ISO)
 
   add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_guest>)
   target_include_directories(ca_psprun PRIVATE src)
-  target_link_libraries(ca_psprun PRIVATE Threads::Threads)
+  target_link_libraries(ca_psprun PRIVATE Threads::Threads SDL2::SDL2)
+  target_include_directories(ca_psprun SYSTEM PRIVATE third_party/stb)
   if(MINGW)
     target_link_options(ca_psprun PRIVATE -static-libgcc -static-libstdc++ -static)
   endif()

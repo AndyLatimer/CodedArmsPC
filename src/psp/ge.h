@@ -13,8 +13,9 @@ namespace psp::ge {
 class Renderer {
 public:
     virtual ~Renderer() = default;
-    // Called for every command that is not list control. `pc` is the command address.
-    virtual void command(uint32_t pc, uint32_t cmd, uint32_t data, uint32_t prevData) = 0;
+    // Called for every command that is not list control. `pc` is the command address and
+    // `relAddr` the data resolved as an address relative to BASE/OFFSET (for VADDR/IADDR).
+    virtual void command(uint32_t pc, uint32_t cmd, uint32_t data, uint32_t prevData, uint32_t relAddr) = 0;
     virtual void listFinished() {}
 };
 

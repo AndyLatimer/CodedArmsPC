@@ -5,6 +5,7 @@
 #include <ctime>
 
 #include "psp/ge.h"
+#include "psp/gpu/gpu.h"
 #include "psp/host.h"
 #include "psp/kernel.h"
 #include "psp/memory.h"
@@ -96,6 +97,7 @@ void registerDeviceHle() {
         g_display.pixelFormat = A(c, 2);
         g_display.frameCount++;
         ret(c, 0);
+        if (gpu::installed() && A(c, 0)) gpu::setDisplay(A(c, 0), A(c, 1), A(c, 2));
     });
     registerHle("sceDisplayGetVcount", [](Ctx* c) { ret(c, (uint32_t)vcount()); });
     registerHle("sceDisplayWaitVblankStart", [](Ctx* c) { waitVblank(false); ret(c, 0); });
