@@ -24,6 +24,7 @@ def main():
     ap.add_argument("--iso")
     ap.add_argument("--elf")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--trace", default="", help="comma separated function addresses to log (debugging)")
     args = ap.parse_args()
     if args.iso:
         data = read_iso_file(args.iso, "PSP_GAME/SYSDIR/BOOT.BIN")
@@ -33,7 +34,8 @@ def main():
         ap.error("--iso or --elf is required")
     mod = PspModule(data)
     funcs, starts = functions.discover(mod)
-    gen, files = codegen.generate(mod, funcs, starts, args.out)
+    trace = list(funcs) if args.trace == "all" else [int(x, 16) for x in args.trace.split(",") if x]
+    gen, files = codegen.generate(mod, funcs, starts, args.out, trace=trace)
     print("functions: %d, files: %d, imports: %d" % (len(funcs), len(files), len(mod.stubs)))
     if gen.unhandled:
         print("UNHANDLED mnemonics:", gen.unhandled)

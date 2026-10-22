@@ -149,7 +149,8 @@ void registerIoHle() {
     });
     registerHle("sceIoOpenAsync", [](Ctx* c) {
         int fd = openFile(readString(A(c, 0)), A(c, 1));
-        if (fd < 0) { log("sceIoOpenAsync(%s) failed", readString(A(c, 0)).c_str()); ret(c, (uint32_t)fd); return; }
+        log("sceIoOpenAsync(%s) -> %d", readString(A(c, 0)).c_str(), fd);
+        if (fd < 0) { ret(c, (uint32_t)fd); return; }
         g_files[fd].asyncPending = true;
         g_files[fd].asyncResult = (uint64_t)fd;
         ret(c, (uint32_t)fd);
@@ -177,7 +178,9 @@ void registerIoHle() {
     });
     registerHle("sceIoReadAsync", [](Ctx* c) {
         int fd = (int)A(c, 0);
+        uint64_t pos = g_files.count(fd) ? g_files[fd].pos : 0;
         int64_t r = readFile(fd, A(c, 1), A(c, 2));
+        log("sceIoReadAsync(%d @%llu, %08x, %x) -> %lld", fd, (unsigned long long)pos, A(c, 1), A(c, 2), (long long)r);
         auto it = g_files.find(fd);
         if (it == g_files.end()) { ret(c, ERR_BADF); return; }
         it->second.asyncPending = true;
@@ -212,6 +215,7 @@ void registerIoHle() {
         int fd = (int)A(c, 0);
         int64_t off = (int64_t)(((uint64_t)A(c, 3) << 32) | A(c, 2));
         int64_t r = seekFile(fd, off, (int)A(c, 4));
+        log("sceIoLseekAsync(%d, %lld, %d) -> %lld", fd, (long long)off, (int)A(c, 4), (long long)r);
         auto it = g_files.find(fd);
         if (it == g_files.end()) { ret(c, ERR_BADF); return; }
         it->second.asyncPending = true;

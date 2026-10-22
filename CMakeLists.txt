@@ -67,6 +67,7 @@ endif()
 # Configure with -DCA_GAME_ISO=/path/to/your/CodedArms.iso. The generated C is derived from
 # the game and stays inside the build directory; it is never committed or distributed.
 set(CA_GAME_ISO "" CACHE FILEPATH "Your own Coded Arms (ULES-00124) ISO, needed for the recompiled build")
+set(CA_RECOMP_TRACE "" CACHE STRING "Debug: comma separated guest function addresses to trace")
 add_library(ca_psp OBJECT
   src/psp/cpu.cpp
   src/psp/vfpu.cpp
@@ -89,7 +90,7 @@ if(CA_GAME_ISO)
   set(CA_GEN_DIR ${CMAKE_BINARY_DIR}/generated)
   message(STATUS "Recompiling BOOT.BIN from ${CA_GAME_ISO}")
   execute_process(
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/recomp/recompile.py --iso ${CA_GAME_ISO} --out ${CA_GEN_DIR}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/recomp/recompile.py --iso ${CA_GAME_ISO} --out ${CA_GEN_DIR} --trace=${CA_RECOMP_TRACE}
     RESULT_VARIABLE CA_RECOMP_RESULT)
   if(NOT CA_RECOMP_RESULT EQUAL 0)
     message(FATAL_ERROR "Recompilation failed")

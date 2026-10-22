@@ -87,6 +87,8 @@ void rt_break(Ctx* c, uint32_t pc);
 void rt_privileged(Ctx* c, uint32_t insn, uint32_t pc);
 void rt_unimplemented(Ctx* c, uint32_t insn, uint32_t pc);
 void rt_fell_off(Ctx* c, uint32_t addr);
+void rt_trace_enter(Ctx* c, uint32_t fn);
+void rt_trace_exit(Ctx* c, uint32_t fn);
 
 #ifdef __cplusplus
 }

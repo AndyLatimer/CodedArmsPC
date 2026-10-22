@@ -3,6 +3,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 
 #include "psp/kernel.h"
 #include "psp/memory.h"
@@ -145,6 +147,90 @@ void rt_unimplemented(Ctx* c, uint32_t insn, uint32_t pc) {
     psp::kernel::fatal(c, "unimplemented instruction %08x at %08x", insn, pc);
 }
 void rt_fell_off(Ctx* c, uint32_t addr) { psp::kernel::fatal(c, "execution fell off the end of code at %08x", addr); }
+// Debug tracing (functions selected at recompile time). Besides logging, checks that every
+// traced function preserves the callee-saved registers (s0-s8, gp, sp) as the MIPS ABI
+// requires: a violation points at a translation bug in that function.
+struct TraceFrame { uint32_t fn; uint32_t saved[11]; };
+static thread_local TraceFrame t_frames[4096];
+static thread_local int t_depth = 0;
+static const int kSavedRegs[11] = {16, 17, 18, 19, 20, 21, 22, 23, 28, 29, 30};
+static bool traceVerbose() { static int v = std::getenv("CA_TRACE_VERBOSE") ? 1 : 0; return v != 0; }
+
+// CA_TRACE_LISTCHANGE="head,nextOffset": report which traced function changed a linked list.
+static void checkListChange(uint32_t fn, const char* where) {
+    static const char* spec = std::getenv("CA_TRACE_LISTCHANGE");
+    if (!spec) return;
+    static uint32_t head = (uint32_t)std::strtoul(spec, nullptr, 16);
+    static uint32_t nextOff = (uint32_t)std::strtoul(std::strchr(spec, ',') + 1, nullptr, 16);
+    static std::string last;
+    std::string cur;
+    char buf[32];
+    uint32_t n = psp::read32(head);
+    for (int i = 0; n && i < 32; ++i, n = psp::read32(n + nextOff)) {
+        std::snprintf(buf, sizeof buf, " %08x(%04x)", n, psp::read16(n + 68));
+        cur += buf;
+    }
+    if (cur != last) {
+        std::fprintf(stderr, "[LIST] %s %08x:%s\n", where, fn, cur.c_str());
+        last = cur;
+    }
+}
+
+void rt_trace_enter(Ctx* c, uint32_t fn) {
+    checkListChange(fn, "enter");
+    if (t_depth < 4096) {
+        TraceFrame& f = t_frames[t_depth];
+        f.fn = fn;
+        for (int i = 0; i < 11; ++i) f.saved[i] = c->r[kSavedRegs[i]];
+    }
+    ++t_depth;
+    if (!traceVerbose()) return;
+    std::fprintf(stderr, "[TRACE] -> %08x(a0=%08x a1=%08x a2=%08x a3=%08x) ra=%08x sp=%08x s0=%08x\n", fn, c->r[4], c->r[5],
+                 c->r[6], c->r[7], c->r[31], c->r[29], c->r[16]);
+    if (const char* l = std::getenv("CA_TRACE_LIST")) { // walk a linked list: "head,nextOffset"
+        uint32_t head = (uint32_t)std::strtoul(l, nullptr, 16);
+        uint32_t nextOff = (uint32_t)std::strtoul(std::strchr(l, ',') + 1, nullptr, 16);
+        uint32_t n = psp::read32(head);
+        std::fprintf(stderr, "        list:");
+        for (int i = 0; n && i < 16; ++i, n = psp::read32(n + nextOff))
+            std::fprintf(stderr, " %08x(p=%04x)", n, psp::read16(n + 68));
+        std::fprintf(stderr, "\n");
+    }
+    if (std::getenv("CA_TRACE_STATE")) // task objects: state at +92, flag at +96
+        std::fprintf(stderr, "        state=%u flag=%u\n", psp::read32(c->r[4] + 92), psp::read8(c->r[4] + 96));
+    if (const char* w = std::getenv("CA_TRACE_WATCH")) { // print a pointer chain
+        uint32_t a = (uint32_t)std::strtoul(w, nullptr, 16);
+        uint32_t g = psp::read32(a);
+        std::fprintf(stderr, "        [%08x]=%08x  [+70]=%08x  [+4]=%08x\n", a, g, g ? psp::read32(g + 0x70) : 0, psp::read32(a + 4));
+    }
+}
+
+void rt_trace_exit(Ctx* c, uint32_t fn) {
+    checkListChange(fn, "exit ");
+    --t_depth;
+    if (t_depth < 4096 && t_depth >= 0) {
+        TraceFrame& f = t_frames[t_depth];
+        for (int i = 0; i < 11; ++i)
+            if (c->r[kSavedRegs[i]] != f.saved[i]) {
+                std::fprintf(stderr, "[ABI] %08x changed r%d: %08x -> %08x\n", fn, kSavedRegs[i], f.saved[i],
+                             c->r[kSavedRegs[i]]);
+                break;
+            }
+    }
+    if (traceVerbose()) {
+        std::fprintf(stderr, "[TRACE] <- %08x = %08x\n", fn, c->r[2]);
+        if (const char* l = std::getenv("CA_TRACE_LIST")) {
+            uint32_t head = (uint32_t)std::strtoul(l, nullptr, 16);
+            uint32_t nextOff = (uint32_t)std::strtoul(std::strchr(l, ',') + 1, nullptr, 16);
+            uint32_t n = psp::read32(head);
+            std::fprintf(stderr, "        list after:");
+            for (int i = 0; n && i < 16; ++i, n = psp::read32(n + nextOff))
+                std::fprintf(stderr, " %08x(p=%04x)", n, psp::read16(n + 68));
+            std::fprintf(stderr, "\n");
+        }
+    }
+}
+
 void hle_syscall(Ctx* c, uint32_t code) { psp::kernel::fatal(c, "raw syscall %x in game code", code); }
 
 } // extern "C"
