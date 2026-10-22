@@ -458,7 +458,7 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         if (haveFrame) {
             // Fit 480:272 into the window (or stretch). Framebuffer row 0 is the top row.
-            float aspect = (float)frame.width / (float)std::max(frame.height, 1), wa = (float)dw / (float)std::max(dh, 1);
+            float aspect = (frame.width * frame.u1) / std::max(1.0f, frame.height * frame.v1), wa = (float)dw / (float)std::max(dh, 1);
             float sx = 1, sy = 1;
             if (!s.stretch) { if (wa > aspect) sx = aspect / wa; else sy = wa / aspect; }
             glUseProgram(blit);
