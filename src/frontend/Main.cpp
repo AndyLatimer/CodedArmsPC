@@ -37,11 +37,14 @@ const uint32_t kInputButtons[12] = {
     psp::host::BTN_UP, psp::host::BTN_DOWN, psp::host::BTN_LEFT, psp::host::BTN_RIGHT, psp::host::BTN_CROSS,
     psp::host::BTN_CIRCLE, psp::host::BTN_SQUARE, psp::host::BTN_TRIANGLE, psp::host::BTN_LTRIGGER,
     psp::host::BTN_RTRIGGER, psp::host::BTN_START, psp::host::BTN_SELECT};
+// Defaults follow the game's control type A: analog = move, triangle/cross/square/circle =
+// look up/look down/turn left/turn right (also driven by the mouse), up = zoom, down = reload,
+// left/right = previous/next weapon, R = attack, L = jump, select = pause, start = map.
 const char* kDefaultBindings[IN_COUNT] = {
-    "key:Up, pad:dpup", "key:Down, pad:dpdown", "key:Left, pad:dpleft", "key:Right, pad:dpright",
-    "key:Space, key:Return, pad:a", "key:Backspace, key:E, pad:b", "key:Q, pad:x", "key:F, pad:y",
-    "mouse:right, key:Left Shift, pad:lefttrigger", "mouse:left, pad:righttrigger", "key:Escape, pad:start",
-    "key:Tab, pad:back", "key:W", "key:S", "key:A", "key:D"};
+    "key:Up, mouse:right, pad:dpup", "key:Down, key:R, pad:dpdown", "key:Left, key:Q, mouse:wheeldown, pad:dpleft",
+    "key:Right, key:E, mouse:wheelup, pad:dpright", "key:Return, key:K, pad:a", "key:L, key:Backspace, pad:b",
+    "key:J, pad:x", "key:I, pad:y", "key:Space, pad:leftshoulder, pad:lefttrigger", "mouse:left, pad:rightshoulder, pad:righttrigger",
+    "key:M, key:Tab, pad:back", "key:Escape, key:P, pad:start", "key:W", "key:S", "key:A", "key:D"};
 
 struct FrontSettings {
     std::string iso;

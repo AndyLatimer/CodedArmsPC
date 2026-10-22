@@ -40,5 +40,7 @@ bool renderPump(PresentInfo& out, int timeoutMs);
 // Reads the visible region of the last presented frame as RGBA8888, top row first.
 bool readPresented(const PresentInfo& p, std::vector<uint32_t>& rgba, int& w, int& h);
 void renderShutdown();
+void dumpNextFrames(int n); // debug: log every draw of the next n frames
+void setMaxDraws(int n);    // debug: execute only the first n draws of each frame (-1 = all)
 
 } // namespace psp::gpu

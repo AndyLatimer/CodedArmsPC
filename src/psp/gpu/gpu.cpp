@@ -4,6 +4,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <atomic>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -19,6 +20,8 @@
 #include "psp/kernel.h"
 #include "psp/memory.h"
 #include "render/GL.h"
+
+extern "C" int stbi_write_png(char const* filename, int w, int h, int comp, const void* data, int stride_in_bytes);
 
 namespace psp::gpu {
 
@@ -714,6 +717,12 @@ bool Recorder::setupTexture(GlState& st, Ubo& u, const FboInfo& target) {
             op.levels.push_back({lw, lh});
         }
         op.blobSize = frame_->blob.size() - op.blob;
+        if (const char* dir = std::getenv("CA_TEX_DUMP")) {
+            char path[512];
+            std::snprintf(path, sizeof path, "%s/tex%04d_%08x_f%d_%dx%d_clut%06x.png", dir, e.id, addr, format, w, h,
+                          clutFmt ? reg(CMD_CLUTFORMAT) : 0);
+            stbi_write_png(path, w, h, 4, frame_->blob.data() + op.blob, w * 4);
+        }
         frame_->ops.push_back(op);
         e.w = w;
         e.h = h;
@@ -998,14 +1007,19 @@ GLuint textureFor(const GlState& s) {
     return 0;
 }
 
+std::atomic<int> g_dumpFrames{0};
+std::atomic<int> g_maxDraws{-1};
+
 void debugFrame(const Frame& fr) {
     static int n = 0;
     static const bool on = std::getenv("CA_GPU_DEBUG") != nullptr;
-    if (!on || (n++ % 60) != 0) return;
+    bool full = false;
+    if (g_dumpFrames > 0 && fr.ops.size() > 2) { --g_dumpFrames; full = true; }
+    else if (!on || (n++ % 60) != 0) return;
     std::fprintf(stderr, "[GPU] frame %llu: %zu ops, %zu verts\n", (unsigned long long)fr.number, fr.ops.size(), fr.verts.size() / kFloatsPerVertex);
     int shown = 0;
     for (const Op& op : fr.ops) {
-        if (op.type == OP_DRAW && shown < 6) {
+        if (op.type == OP_DRAW && (shown < 6 || full)) {
             ++shown;
             const float* v = &fr.verts[op.first * kFloatsPerVertex];
             const Ubo& u = fr.ubos[op.ubo];
@@ -1013,6 +1027,10 @@ void debugFrame(const Frame& fr) {
                          op.glMode, op.count, op.st.texKind, op.st.texId, u.vpScale[3], u.texFlags[2], op.st.scissor[0], op.st.scissor[1],
                          op.st.scissor[2], op.st.scissor[3], u.offsetFb[2], u.offsetFb[3], v[0], v[1], v[2], v[6], v[7], v[8], v[9], v[10], v[11],
                          op.st.colorMask[0], op.st.colorMask[1], op.st.colorMask[2], op.st.colorMask[3], op.st.blend, op.st.depthTest, op.st.depthFunc);
+            if (full)
+                std::fprintf(stderr, "     blend src=%x dst=%x eq=%x const=(%g,%g,%g) premul=%g texfunc=%g alphaUse=%g dbl=%g alphatest=%g/%g/%g fog=%g light=%g\n",
+                             op.st.srcRGB, op.st.dstRGB, op.st.eqRGB, op.st.blendColor[0], op.st.blendColor[1], op.st.blendColor[2],
+                             u.blendPremul[3], u.texEnv[3], u.texFlags[0], u.texFlags[1], u.alphaTest[0], u.alphaTest[1], u.alphaTest[2], u.flags1[2], u.flags0[0]);
         } else if (op.type != OP_DRAW) {
             std::fprintf(stderr, "  op %d id=%d id2=%d %dx%d @%d,%d\n", (int)op.type, op.id, op.id2, op.w, op.h, op.x, op.y);
         }
@@ -1026,7 +1044,9 @@ void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented) {
     glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(fr.verts.size() * sizeof(float)), fr.verts.data(), GL_STREAM_DRAW);
     glUseProgram(g_exec.program);
     g_exec.bound = -1;
+    int drawIndex = 0;
     for (Op& op : fr.ops) {
+        if (op.type == OP_DRAW && g_maxDraws >= 0 && drawIndex++ >= g_maxDraws) continue;
         switch (op.type) {
         case OP_CREATE_FBO: {
             GlFbo& f = g_exec.fbos[op.id];
@@ -1221,5 +1241,8 @@ bool readPresented(const PresentInfo& p, std::vector<uint32_t>& rgba, int& w, in
 }
 
 void renderShutdown() {}
+
+void dumpNextFrames(int n) { g_dumpFrames = n; }
+void setMaxDraws(int n) { g_maxDraws = n; }
 
 } // namespace psp::gpu

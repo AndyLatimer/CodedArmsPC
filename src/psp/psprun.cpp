@@ -195,6 +195,66 @@ void pressThread(std::vector<Press> presses) {
 } // namespace
 
 // Runs the game on a worker thread and the renderer on this one, in a hidden GL window.
+// Interactive control (--control FIFO): one command per line, "press BUTTON[+BUTTON...] [SECONDS]",
+// "hold BUTTONS", "release", "stick X Y" (0..255), "shot FILE.png", "quit".
+std::mutex g_ctlMutex;
+std::vector<std::string> g_ctlShots;
+void controlThread(std::string path) {
+    for (;;) {
+        FILE* f = std::fopen(path.c_str(), "r");
+        if (!f) { std::this_thread::sleep_for(std::chrono::milliseconds(100)); continue; }
+        char line[512];
+        while (std::fgets(line, sizeof line, f)) {
+            std::string l(line);
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r')) l.pop_back();
+            char cmd[32] = {}, arg[256] = {};
+            double secs = 0.15;
+            int n = std::sscanf(l.c_str(), "%31s %255s %lf", cmd, arg, &secs);
+            if (n < 1) continue;
+            std::string c = cmd;
+            auto mask = [](const std::string& a) {
+                uint32_t m = 0;
+                size_t p = 0;
+                while (p <= a.size()) {
+                    size_t q = a.find('+', p);
+                    m |= buttonByName(a.substr(p, q == std::string::npos ? std::string::npos : q - p));
+                    if (q == std::string::npos) break;
+                    p = q + 1;
+                }
+                return m;
+            };
+            if (c == "press") {
+                uint32_t m = mask(arg);
+                psp::host::g_ctrl.buttons |= m;
+                std::this_thread::sleep_for(std::chrono::milliseconds((long long)(secs * 1000)));
+                psp::host::g_ctrl.buttons &= ~m;
+            } else if (c == "hold") {
+                psp::host::g_ctrl.buttons |= mask(arg);
+            } else if (c == "release") {
+                psp::host::g_ctrl.buttons = 0;
+                psp::host::g_ctrl.lx = 128;
+                psp::host::g_ctrl.ly = 128;
+            } else if (c == "stick") {
+                int x = 128, y = 128;
+                std::sscanf(l.c_str(), "%*s %d %d", &x, &y);
+                psp::host::g_ctrl.lx = (uint8_t)x;
+                psp::host::g_ctrl.ly = (uint8_t)y;
+            } else if (c == "shot") {
+                std::lock_guard<std::mutex> lk(g_ctlMutex);
+                g_ctlShots.push_back(arg);
+            } else if (c == "gpudump") {
+                psp::gpu::dumpNextFrames(n >= 2 && std::atoi(arg) > 0 ? std::atoi(arg) : 1);
+            } else if (c == "maxdraw") {
+                psp::gpu::setMaxDraws(std::atoi(arg));
+            } else if (c == "quit") {
+                std::_Exit(0);
+            }
+            std::fprintf(stderr, "[CTL] %s\n", l.c_str());
+        }
+        std::fclose(f);
+    }
+}
+
 int runWithGl(const psp::kernel::BootOptions& opt, int scale, std::vector<std::pair<double, std::string>> shots) {
     if (SDL_Init(SDL_INIT_VIDEO) != 0) { std::fprintf(stderr, "SDL_Init: %s\n", SDL_GetError()); return 1; }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
@@ -221,6 +281,11 @@ int runWithGl(const psp::kernel::BootOptions& opt, int scale, std::vector<std::p
         psp::gpu::PresentInfo p;
         if (psp::gpu::renderPump(p, 5)) { last = p; have = true; ++frames; }
         double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        {
+            std::lock_guard<std::mutex> lk(g_ctlMutex);
+            for (auto& f : g_ctlShots) shots.insert(shots.begin(), {0.0, f});
+            g_ctlShots.clear();
+        }
         while (!shots.empty() && t >= shots.front().first) {
             std::vector<uint32_t> px;
             int w = 0, h = 0;
@@ -251,6 +316,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--trace")) opt.traceHle = true;
         else if (!std::strcmp(argv[i], "--seconds") && i + 1 < argc) seconds = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--gl")) gl = true;
+        else if (!std::strcmp(argv[i], "--control") && i + 1 < argc) std::thread(controlThread, std::string(argv[++i])).detach();
         else if (!std::strcmp(argv[i], "--scale") && i + 1 < argc) scale = std::atoi(argv[++i]);
         else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
             std::string spec = argv[++i];
