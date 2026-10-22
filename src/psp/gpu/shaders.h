@@ -17,7 +17,7 @@ namespace psp::gpu {
     "  vec4 uLightParams[4], uLightSpot[4];\n"                                              \
     "  vec4 uFlags0, uFlags1, uTexgen, uTexScaleOff, uTexSize, uFog, uFogColor;\n"          \
     "  vec4 uTexEnv, uTexFlags, uAlphaTest, uColorTest, uColorRef, uColorMask;\n"           \
-    "  vec4 uDepthRange, uBlendPremul;\n"                                                   \
+    "  vec4 uDepthRange, uBlendPremul, uWide;\n"                                                   \
     "};\n"
 
 static const char* kVertexShader =
@@ -112,7 +112,8 @@ static const char* kVertexShader =
     "      vUV = vec3(aUV * uTexScaleOff.xy + uTexScaleOff.zw, 1.0);\n"
     "    }\n"
     "  }\n"
-    "  vUV.xy *= uTexSize.zw;\n"
+    "  vUV.xy = vUV.xy * uTexSize.zw + vec2(uWide.w, 0.0) * vUV.z;\n"
+    "  px.x = uWide.y > 0.5 ? px.x * (uOffsetFb.z / 480.0) : px.x + uWide.x;\n"
     "  vColor0 = col; vColor0Flat = col;\n"
     "  vColor1 = spec; vColor1Flat = spec;\n"
     "  gl_Position = vec4(px.x / uOffsetFb.z * 2.0 - 1.0, px.y / uOffsetFb.w * 2.0 - 1.0, z / 65535.0 * 2.0 - 1.0, 1.0) * w;\n"
@@ -173,6 +174,7 @@ static const char* kFragmentShader =
     "  if (uFlags1.z > 0.5) c.rgb = mix(uFogColor.rgb, c.rgb, clamp(vFog, 0.0, 1.0));\n"
     "  if (uBlendPremul.w > 0.5) c.rgb *= uBlendPremul.rgb;\n"
     "  fragColor = c;\n"
+
     "}\n";
 
 } // namespace psp::gpu

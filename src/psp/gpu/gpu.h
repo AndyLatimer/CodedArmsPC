@@ -15,6 +15,7 @@ namespace psp::gpu {
 struct Settings {
     int scale = 2;            // internal resolution multiple of 480x272
     bool forceLinear = false; // bilinear filtering on every texture
+    float wideAspect = 0;     // > 0: display buffers widened to this aspect (Hor+), e.g. 21/9
 };
 
 // Guest side ----------------------------------------------------------------------------
@@ -41,6 +42,7 @@ bool renderPump(PresentInfo& out, int timeoutMs);
 bool readPresented(const PresentInfo& p, std::vector<uint32_t>& rgba, int& w, int& h);
 void renderShutdown();
 void dumpNextFrames(int n); // debug: log every draw of the next n frames
-void setMaxDraws(int n);    // debug: execute only the first n draws of each frame (-1 = all)
+void setMaxDraws(int n);
+void setSkipFramebufferTextures(bool skip); // debug    // debug: execute only the first n draws of each frame (-1 = all)
 
 } // namespace psp::gpu

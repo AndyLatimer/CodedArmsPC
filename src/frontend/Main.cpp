@@ -55,6 +55,7 @@ struct FrontSettings {
     bool linearOutput = true;
     bool forceLinearTextures = false;
     bool stretch = false;
+    int widescreen = 1;     // 1: widen the view to the window's aspect (Hor+); 0: original 480x272
     float volume = 1.0f;
     float deadzone = 0.2f;
     // Mouse look (until the game's camera is driven directly: mapped onto the look buttons).
@@ -100,6 +101,7 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.linearOutput = getF(ini, "video", "linear_output", 1) != 0;
     s.forceLinearTextures = getF(ini, "video", "force_linear_textures", 0) != 0;
     s.stretch = getF(ini, "video", "stretch", 0) != 0;
+    s.widescreen = (int)getF(ini, "video", "widescreen", 1);
     s.volume = getF(ini, "audio", "volume", 1.0f);
     s.deadzone = getF(ini, "input", "deadzone", 0.2f);
     s.mouseLookMode = (int)getF(ini, "input", "mouse_look", 1);
@@ -131,6 +133,7 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
     ini.set("video", "linear_output", s.linearOutput ? "1" : "0");
     ini.set("video", "force_linear_textures", s.forceLinearTextures ? "1" : "0");
     ini.set("video", "stretch", s.stretch ? "1" : "0");
+    ini.set("video", "widescreen", std::to_string(s.widescreen));
     ini.set("audio", "volume", std::to_string(s.volume));
     ini.set("input", "deadzone", std::to_string(s.deadzone));
     ini.set("input", "mouse_look", std::to_string(s.mouseLookMode));
@@ -357,6 +360,8 @@ int main(int argc, char** argv) {
     psp::gpu::Settings gs;
     gs.scale = s.renderScale > 0 ? s.renderScale : std::clamp((dh + 271) / 272, 1, 8);
     gs.forceLinear = s.forceLinearTextures;
+    // Hor+: the PSP's 480x272 is ~16:9; wider windows see more to the sides (set at start-up).
+    if (s.widescreen && dw > 0 && dh > 0 && (float)dw / dh > 480.0f / 272.0f + 0.01f) gs.wideAspect = (float)dw / dh;
     psp::gpu::install(gs);
     if (!psp::gpu::renderInit()) return 1;
     GLuint blit = makeProgram(kBlitVs, kBlitFs);
@@ -453,7 +458,7 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         if (haveFrame) {
             // Fit 480:272 into the window (or stretch). Framebuffer row 0 is the top row.
-            float aspect = 480.0f / 272.0f, wa = (float)dw / (float)std::max(dh, 1);
+            float aspect = (float)frame.width / (float)std::max(frame.height, 1), wa = (float)dw / (float)std::max(dh, 1);
             float sx = 1, sy = 1;
             if (!s.stretch) { if (wa > aspect) sx = aspect / wa; else sy = wa / aspect; }
             glUseProgram(blit);

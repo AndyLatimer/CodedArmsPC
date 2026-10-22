@@ -55,10 +55,12 @@ struct Ubo {
     float colorMask[4];
     float depthRange[4];     // minz, maxz, enabled
     float blendPremul[4];    // rgb factor, enabled
+    float wide[4];           // x shift (pixels), stretch 480 -> full width, -, texture u offset
 };
 
 struct GlState {
     bool blend = false;
+    bool alphaConst = false; // write blendColor[3] to the alpha channel (stencil value)
     uint32_t srcRGB = GL_ONE, dstRGB = GL_ZERO, eqRGB = GL_FUNC_ADD;
     float blendColor[4] = {0, 0, 0, 0};
     bool depthTest = false, depthWrite = false, depthClamp = false;
@@ -78,7 +80,7 @@ struct GlState {
     int maxLevel = 0;
 };
 
-enum OpType { OP_CREATE_FBO, OP_BIND_FBO, OP_UPLOAD_TEX, OP_UPLOAD_FBO_RECT, OP_DRAW, OP_BLIT_FBO, OP_PRESENT, OP_DELETE_TEX };
+enum OpType { OP_CLEAR_FBO, OP_CREATE_FBO, OP_BIND_FBO, OP_UPLOAD_TEX, OP_UPLOAD_FBO_RECT, OP_DRAW, OP_BLIT_FBO, OP_PRESENT, OP_DELETE_TEX };
 
 struct Op {
     OpType type;
@@ -133,6 +135,8 @@ struct FboInfo {
     bool drawnSincePresent = false;
     bool created = false;
     uint64_t memHash = 0; // guest memory of the buffer when last synced; the GE never writes it
+    int extra = 0;        // widescreen: pixels added on each side of a 480x272 display buffer
+    int glW() const { return w + 2 * extra; }
 };
 
 struct TexEntry {
@@ -196,6 +200,8 @@ private:
     uint32_t displayAddr_ = 0, displayStride_ = 512, displayFormat_ = 3;
     int vblanksSincePresent_ = 0;
     bool premulBlend_ = false;
+    bool alphaOverride_ = false;
+    float alphaOut_ = 0;
     float premulColor_[3] = {1, 1, 1};
     // Pending CPU writes to VRAM: rectangles to refresh per framebuffer key.
     std::map<uint32_t, std::vector<std::pair<uint32_t, uint32_t>>> memDirty_;
@@ -222,6 +228,9 @@ private:
             f.format = fmt;
             f.w = std::max(std::min<int>((int)f.stride, 480), needW);
             f.h = std::max(272, needH);
+            // Display-sized buffers get extra width for wide screens (Hor+).
+            if (g_settings.wideAspect > 0 && f.w == 480 && f.h == 272)
+                f.extra = std::max(0, (int)std::lround((272.0 * g_settings.wideAspect - 480.0) / 2.0));
             it = fbos_.emplace(key, f).first;
         }
         FboInfo& f = it->second;
@@ -233,7 +242,7 @@ private:
             f.h = std::max(f.h, std::min(needH, 1024));
             Op op{OP_CREATE_FBO};
             op.id = f.id;
-            op.w = f.w;
+            op.w = f.glW();
             op.h = f.h;
             frame_->ops.push_back(op);
             f.created = true;
@@ -266,9 +275,14 @@ private:
         if (y1 <= y0) return;
         const int w = f.w, h = y1 - y0;
         const uint32_t bpp = f.format == 3 ? 4 : 2;
+        if (f.extra && y0 == 0 && y1 >= 272) {
+            Op clr{OP_CLEAR_FBO};
+            clr.id = f.id;
+            frame_->ops.push_back(clr);
+        }
         Op op{OP_UPLOAD_FBO_RECT};
         op.id = f.id;
-        op.x = 0;
+        op.x = f.extra;
         op.y = y0;
         op.w = w;
         op.h = h;
@@ -308,7 +322,7 @@ private:
             }
             Op op{OP_PRESENT};
             op.id = f.id;
-            op.w = 480;
+            op.w = f.glW();
             op.h = 272;
             frame_->ops.push_back(op);
             for (auto& [k, fb] : fbos_) fb.drawnSincePresent = false;
@@ -408,7 +422,7 @@ void Recorder::transfer(uint32_t data) {
         Op op{OP_BLIT_FBO};
         op.id = srcFbo->second.id;
         op.id2 = dstFbo->second.id;
-        op.x = sx; op.y = sy; op.x2 = dx; op.y2 = dy; op.w = w; op.h = h;
+        op.x = sx + srcFbo->second.extra; op.y = sy; op.x2 = dx + dstFbo->second.extra; op.y2 = dy; op.w = w; op.h = h;
         frame_->ops.push_back(op);
         boundFbo_ = 0;
         dstFbo->second.drawnSincePresent = true;
@@ -459,7 +473,8 @@ void Recorder::buildUbo(Ubo& u, const FboInfo& f, bool through, bool hasColor) {
     u.vpCenter[2] = float24(reg(CMD_VIEWPORTZCENTER));
     u.offsetFb[0] = (reg(CMD_OFFSETX) & 0xFFFF) / 16.0f;
     u.offsetFb[1] = (reg(CMD_OFFSETY) & 0xFFFF) / 16.0f;
-    u.offsetFb[2] = (float)f.w;
+    u.offsetFb[2] = (float)f.glW();
+    u.wide[0] = (float)f.extra;
     u.offsetFb[3] = (float)f.h;
     colorToVec(reg(CMD_MATERIALAMBIENT), u.matAmbient, (reg(CMD_MATERIALALPHA) & 0xFF) / 255.0f);
     colorToVec(reg(CMD_MATERIALDIFFUSE), u.matDiffuse);
@@ -611,7 +626,17 @@ void Recorder::buildState(GlState& st, const FboInfo& f, bool through, int prim)
     st.colorMask[0] = (mrgb & 0xFF) != 0xFF;
     st.colorMask[1] = ((mrgb >> 8) & 0xFF) != 0xFF;
     st.colorMask[2] = ((mrgb >> 16) & 0xFF) != 0xFF;
-    st.colorMask[3] = (reg(CMD_MASKALPHA) & 0xFF) != 0xFF;
+    // The PSP's framebuffer alpha is its stencil buffer: drawing only changes it through stencil
+    // operations (PPSSPP GPUStateUtils: "not write to alpha if stencil isn't enabled").
+    st.colorMask[3] = false;
+    if (st.stencil && (reg(CMD_MASKALPHA) & 0xFF) != 0xFF) {
+        const int zpass = (reg(CMD_STENCILOP) >> 16) & 7;
+        if (zpass == 2 || zpass == 1) { // REPLACE / ZERO: the written stencil value becomes the alpha
+            st.colorMask[3] = true;
+            alphaOut_ = zpass == 2 ? st.stencilRef / 255.0f : 0.0f;
+            alphaOverride_ = true;
+        }
+    }
     // Culling (never for through mode or rectangles)
     if (!through && prim != PRIM_RECTANGLES && (reg(CMD_CULLFACEENABLE) & 1)) {
         st.cull = true;
@@ -657,8 +682,9 @@ bool Recorder::setupTexture(GlState& st, Ubo& u, const FboInfo& target) {
             st.texId = src.id;
             st.maxLevel = 0;
             if (st.minFilter != GL_NEAREST && st.minFilter != GL_LINEAR) st.minFilter = (st.minFilter == GL_NEAREST_MIPMAP_NEAREST || st.minFilter == GL_NEAREST_MIPMAP_LINEAR) ? GL_NEAREST : GL_LINEAR;
-            u.texSize[2] = (float)w / src.w;
+            u.texSize[2] = (float)w / src.glW();
             u.texSize[3] = (float)h / src.h;
+            u.wide[3] = (float)src.extra / src.glW();
             (void)target;
             return true;
         }
@@ -966,9 +992,17 @@ void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasCo
 
     Op op{OP_DRAW};
     Ubo ubo;
+    bool transformedRect = false;
     buildUbo(ubo, target, through, hasColor);
     premulBlend_ = false;
+    alphaOverride_ = false;
     buildState(op.st, target, through, prim);
+    if (alphaOverride_) {
+        // The stencil value goes to the alpha channel through the blend's alpha half, so the
+        // fragment alpha still drives the color blend factors.
+        op.st.alphaConst = true;
+        op.st.blendColor[3] = alphaOut_;
+    }
     if (premulBlend_) {
         std::memcpy(ubo.blendPremul, premulColor_, 3 * sizeof(float));
         ubo.blendPremul[3] = 1.0f;
@@ -986,6 +1020,7 @@ void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasCo
     std::vector<Vertex> out;
     if (prim == PRIM_RECTANGLES) {
         if (!through) {
+            transformedRect = true;
             for (auto& v : vin) {
                 float s[3];
                 transformToScreen(mtx_, ubo, v, s);
@@ -1023,6 +1058,45 @@ void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasCo
     }
     if (out.empty()) return;
     if (through) op.st.cull = false;
+
+    // Widescreen, sampling a widened buffer: UVs spanning its whole 480-pixel width (screen copies
+    // for glow/blur passes) take the whole widened width, so the copy holds the full picture and
+    // the stretched full-screen composite puts it back in place.
+    if (op.st.texKind == 2 && ubo.wide[3] > 0) {
+        float minU = 1e9f, maxU = -1e9f;
+        const bool texThrough = through && !transformedRect;
+        for (const Vertex& v : out) {
+            float u = texThrough ? v.uv[0] : v.uv[0] * ubo.texSize[0];
+            if (!texThrough && (reg(CMD_TEXMAPMODE) & 3) == 0 && !transformedRect)
+                u = (v.uv[0] * ubo.texScaleOff[0] + ubo.texScaleOff[2]) * ubo.texSize[0];
+            minU = std::min(minU, u);
+            maxU = std::max(maxU, u);
+        }
+        if (minU <= 0.5f && maxU >= 479.5f) {
+            ubo.texSize[2] = ubo.texSize[0] / 480.0f;
+            ubo.wide[3] = 0.0f;
+        }
+    }
+
+    // Widescreen: 3D is shifted into the middle of the wider buffer and sees more to the sides;
+    // 2D keeps its size in the middle, except full-screen quads (backgrounds, fades, clears),
+    // which are stretched over the whole width.
+    if (target.extra) {
+        float minX = 1e9f, maxX = -1e9f;
+        for (const Vertex& v : out) { minX = std::min(minX, v.pos[0]); maxX = std::max(maxX, v.pos[0]); }
+        const bool fullScissor = op.st.scissor[0] == 0 && op.st.scissor[2] >= 480;
+        const bool stretch = (through || clear) && minX <= 0.5f && maxX >= 479.5f && !transformedRect;
+        const float k = (float)target.glW() / 480.0f;
+        if (stretch) {
+            ubo.wide[1] = 1.0f;
+            op.st.scissor[0] = (int)std::floor(op.st.scissor[0] * k);
+            op.st.scissor[2] = fullScissor ? target.glW() : (int)std::ceil(op.st.scissor[2] * k);
+        } else if (!through && fullScissor) {
+            op.st.scissor[2] = target.glW();
+        } else {
+            op.st.scissor[0] += target.extra;
+        }
+    }
 
     op.first = frame_->verts.size() / kFloatsPerVertex;
     op.count = out.size();
@@ -1124,10 +1198,11 @@ void applyState(const GlState& s, const GlFbo& target) {
     glEnable(GL_SCISSOR_TEST);
     glScissor(s.scissor[0] * scale, s.scissor[1] * scale, s.scissor[2] * scale, s.scissor[3] * scale);
     (void)target;
-    if (s.blend) {
+    if (s.blend || s.alphaConst) {
         glEnable(GL_BLEND);
-        glBlendEquationSeparate(s.eqRGB, GL_FUNC_ADD);
-        glBlendFuncSeparate(s.srcRGB, s.dstRGB, GL_ONE, GL_ZERO);
+        glBlendEquationSeparate(s.blend ? s.eqRGB : GL_FUNC_ADD, GL_FUNC_ADD);
+        glBlendFuncSeparate(s.blend ? s.srcRGB : GL_ONE, s.blend ? s.dstRGB : GL_ZERO,
+                            s.alphaConst ? GL_CONSTANT_ALPHA : GL_ONE, GL_ZERO);
         glBlendColor(s.blendColor[0], s.blendColor[1], s.blendColor[2], s.blendColor[3]);
     } else {
         glDisable(GL_BLEND);
@@ -1197,6 +1272,7 @@ GLuint textureFor(const GlState& s) {
 
 std::atomic<int> g_dumpFrames{0};
 std::atomic<int> g_maxDraws{-1};
+std::atomic<int> g_skipFbTex{0};
 
 void debugFrame(const Frame& fr) {
     static int n = 0;
@@ -1216,7 +1292,8 @@ void debugFrame(const Frame& fr) {
                          op.st.scissor[2], op.st.scissor[3], u.offsetFb[2], u.offsetFb[3], v[0], v[1], v[2], v[6], v[7], v[8], v[9], v[10], v[11],
                          op.st.colorMask[0], op.st.colorMask[1], op.st.colorMask[2], op.st.colorMask[3], op.st.blend, op.st.depthTest, op.st.depthFunc);
             if (full)
-                std::fprintf(stderr, "     blend src=%x dst=%x eq=%x const=(%g,%g,%g) premul=%g texfunc=%g alphaUse=%g dbl=%g alphatest=%g/%g/%g fog=%g light=%g\n",
+                std::fprintf(stderr, "     stencil=%d func=%x ref=%d mask=%x ops=%x/%x/%x wr=%x aconst=%d(%g) blend src=%x dst=%x eq=%x const=(%g,%g,%g) premul=%g texfunc=%g alphaUse=%g dbl=%g alphatest=%g/%g/%g fog=%g light=%g\n",
+                             op.st.stencil, op.st.stencilFunc, op.st.stencilRef, op.st.stencilMask, op.st.sfail, op.st.zfail, op.st.zpass, op.st.stencilWrite, op.st.alphaConst, op.st.blendColor[3],
                              op.st.srcRGB, op.st.dstRGB, op.st.eqRGB, op.st.blendColor[0], op.st.blendColor[1], op.st.blendColor[2],
                              u.blendPremul[3], u.texEnv[3], u.texFlags[0], u.texFlags[1], u.alphaTest[0], u.alphaTest[1], u.alphaTest[2], u.flags1[2], u.flags0[0]);
         } else if (op.type != OP_DRAW) {
@@ -1235,6 +1312,7 @@ void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented) {
     int drawIndex = 0;
     for (Op& op : fr.ops) {
         if (op.type == OP_DRAW && g_maxDraws >= 0 && drawIndex++ >= g_maxDraws) continue;
+        if (op.type == OP_DRAW && g_skipFbTex && op.st.texKind == 2) continue;
         switch (op.type) {
         case OP_CREATE_FBO: {
             GlFbo& f = g_exec.fbos[op.id];
@@ -1242,6 +1320,17 @@ void execFrame(Frame& fr, PresentInfo& pinfo, bool& presented) {
             break;
         }
         case OP_BIND_FBO: bindTarget(op.id); break;
+        case OP_CLEAR_FBO: {
+            auto it = g_exec.fbos.find(op.id);
+            if (it == g_exec.fbos.end()) break;
+            glBindFramebuffer(GL_FRAMEBUFFER, it->second.fbo);
+            glDisable(GL_SCISSOR_TEST);
+            glColorMask(1, 1, 1, 1);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+            g_exec.bound = -1;
+            break;
+        }
         case OP_UPLOAD_TEX: {
             GLuint& t = g_exec.textures[op.id];
             if (!t) glGenTextures(1, &t);
@@ -1432,5 +1521,6 @@ void renderShutdown() {}
 
 void dumpNextFrames(int n) { g_dumpFrames = n; }
 void setMaxDraws(int n) { g_maxDraws = n; }
+void setSkipFramebufferTextures(bool b) { g_skipFbTex = b; }
 
 } // namespace psp::gpu

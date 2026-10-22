@@ -197,6 +197,7 @@ void pressThread(std::vector<Press> presses) {
 // Runs the game on a worker thread and the renderer on this one, in a hidden GL window.
 // Interactive control (--control FIFO): one command per line, "press BUTTON[+BUTTON...] [SECONDS]",
 // "hold BUTTONS", "release", "stick X Y" (0..255), "shot FILE.png", "quit".
+float g_aspect = 0;
 std::mutex g_ctlMutex;
 std::vector<std::string> g_ctlShots;
 void controlThread(std::string path) {
@@ -257,6 +258,8 @@ void controlThread(std::string path) {
                     std::fwrite(psp::hostPtr(0x08800000), 1, 0x01800000, o);
                     std::fclose(o);
                 }
+            } else if (c == "skipfbtex") {
+                psp::gpu::setSkipFramebufferTextures(std::atoi(arg) != 0);
             } else if (c == "maxdraw") {
                 psp::gpu::setMaxDraws(std::atoi(arg));
             } else if (c == "quit") {
@@ -282,6 +285,7 @@ int runWithGl(const psp::kernel::BootOptions& opt, int scale, std::vector<std::p
     std::fprintf(stderr, "[RUN] GL: %s / %s\n", (const char*)glGetString(GL_RENDERER), (const char*)glGetString(GL_VERSION));
     psp::gpu::Settings gs;
     gs.scale = scale;
+    gs.wideAspect = g_aspect;
     psp::gpu::install(gs);
     if (!psp::gpu::renderInit()) return 1;
     std::thread([opt] { std::_Exit(psp::kernel::boot(opt)); }).detach();
@@ -331,6 +335,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--gl")) gl = true;
         else if (!std::strcmp(argv[i], "--control") && i + 1 < argc) std::thread(controlThread, std::string(argv[++i])).detach();
         else if (!std::strcmp(argv[i], "--scale") && i + 1 < argc) scale = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--aspect") && i + 1 < argc) g_aspect = (float)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--shot") && i + 1 < argc) {
             std::string spec = argv[++i];
             size_t c = spec.find(':');
