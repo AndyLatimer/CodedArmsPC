@@ -13,6 +13,7 @@
 #include <condition_variable>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <map>
 #include <memory>
@@ -347,6 +348,7 @@ static int runCallbacks() {
         }
         if (!id) return ran;
         uint32_t ret = 0;
+        if (g_trace) log("callback %d '%s' -> %08x(count=%d, arg=%08x)", id, cb.name.c_str(), cb.func, cb.notifyCount, cb.notifyArg);
         runGuestFunction(cb.func, (uint32_t)cb.notifyCount, cb.notifyArg, cb.arg, 0, &ret);
         ++ran;
         if (ret) {
@@ -355,6 +357,8 @@ static int runCallbacks() {
         }
     }
 }
+
+int runPendingCallbacks() { return runCallbacks(); }
 
 // ---- HLE dispatch ----------------------------------------------------------------------
 static std::unordered_map<std::string, HleFn>& registry() {
@@ -405,7 +409,7 @@ static void afterHle(Ctx* c) {
 extern "C" void hle_call(Ctx* c, int idx) {
     ImportSlot& s = g_imports[(size_t)idx];
     if (g_trace)
-        log("%s(%08x, %08x, %08x, %08x) thread=%d", s.name.c_str(), c->r[4], c->r[5], c->r[6], c->r[7], currentThreadId());
+        log("%s(%08x, %08x, %08x, %08x) thread=%d ra=%08x", s.name.c_str(), c->r[4], c->r[5], c->r[6], c->r[7], currentThreadId(), c->r[31]);
     if (s.fn) {
         s.fn(c);
     } else {
@@ -596,6 +600,12 @@ int boot(const BootOptions& opt) {
         return 1;
     }
     log("module loaded at %08x-%08x, entry %08x, gp %08x", g_module_base, end, entry, g_gp);
+    if (const char* dump = std::getenv("CA_DUMP_IMAGE")) { // debugging: compare with the recompiler's image
+        if (FILE* f = std::fopen(dump, "wb")) {
+            std::fwrite(hostPtr(g_module_base), 1, end - g_module_base, f);
+            std::fclose(f);
+        }
+    }
 
     g_userPartition.init(kUserRam, kRamEnd);
     g_userPartition.reserve(kUserRam, 0x4000);              // loader area below the module

@@ -108,3 +108,16 @@ if(CA_GAME_ISO)
     target_link_options(ca_psprun PRIVATE -static-libgcc -static-libstdc++ -static)
   endif()
 endif()
+
+# ---- Differential CPU test (needs the game image like the recompiled build) ----------------
+if(CA_GAME_ISO)
+  set(CA_CPU_TESTS ${CA_GEN_DIR}/cpu_tests.c)
+  execute_process(COMMAND ${Python3_EXECUTABLE} -c "import sys; sys.path.insert(0, '${CMAKE_SOURCE_DIR}/tools/recomp'); from iso9660 import read_iso_file; open('${CA_GEN_DIR}/BOOT.BIN','wb').write(read_iso_file('${CA_GAME_ISO}', 'PSP_GAME/SYSDIR/BOOT.BIN'))")
+  execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/recomp/gen_cpu_tests.py ${CA_GEN_DIR}/BOOT.BIN ${CA_CPU_TESTS})
+  add_executable(cpu_diff tests/cpu_diff/cpu_diff.cpp tests/cpu_diff/ref_interp.cpp ${CA_CPU_TESTS}
+                 src/psp/cpu.cpp src/psp/memory.cpp)
+  target_include_directories(cpu_diff PRIVATE src tests/cpu_diff)
+  if(NOT MSVC)
+    set_source_files_properties(${CA_CPU_TESTS} PROPERTIES COMPILE_OPTIONS "-w;-fwrapv;-fno-strict-aliasing")
+  endif()
+endif()

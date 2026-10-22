@@ -24,10 +24,18 @@ namespace {
 constexpr double kVblankUs = 1001000000.0 / 60000.0; // 59.94 Hz
 uint64_t vcount() { return (uint64_t)(nowUs() / kVblankUs); }
 void waitVblank(bool cb) {
+    if (cb) runPendingCallbacks();
     uint64_t next = (vcount() + 1) * (uint64_t)kVblankUs + 1;
     uint64_t now = nowUs();
     delayCurrentThread(next > now ? next - now : 1, cb);
+    if (cb) runPendingCallbacks();
 }
+
+int g_umdCallback = 0;
+// PSP_UMD_* bits (PPSSPP sceUmd.h): PRESENT 0x02, READY 0x10, READABLE 0x20. The activation
+// notification carries PRESENT|READABLE (READY only for modules with a compiled SDK version,
+// which this game does not declare).
+constexpr uint32_t kUmdPresent = 0x02, kUmdReady = 0x10, kUmdReadable = 0x20;
 
 // Utility dialogs share one simple state machine: 0 none, 1 init, 2 visible, 3 quit, 4 finished.
 struct Dialog {
@@ -219,11 +227,14 @@ void registerDeviceHle() {
 
     // ---- sceUmdUser
     registerHle("sceUmdCheckMedium", [](Ctx* c) { ret(c, 1); });
-    registerHle("sceUmdActivate", [](Ctx* c) { ret(c, 0); });
+    registerHle("sceUmdActivate", [](Ctx* c) {
+        if (g_umdCallback) notifyCallback(g_umdCallback, 1, kUmdPresent | kUmdReadable);
+        ret(c, 0);
+    });
     registerHle("sceUmdWaitDriveStat", [](Ctx* c) { ret(c, 0); });
-    registerHle("sceUmdGetDriveStat", [](Ctx* c) { ret(c, 0x32); }); // present | ready | readable
-    registerHle("sceUmdRegisterUMDCallBack", [](Ctx* c) { ret(c, 0); });
-    registerHle("sceUmdUnRegisterUMDCallBack", [](Ctx* c) { ret(c, 0); });
+    registerHle("sceUmdGetDriveStat", [](Ctx* c) { ret(c, kUmdPresent | kUmdReady | kUmdReadable); });
+    registerHle("sceUmdRegisterUMDCallBack", [](Ctx* c) { g_umdCallback = (int)A(c, 0); ret(c, 0); });
+    registerHle("sceUmdUnRegisterUMDCallBack", [](Ctx* c) { g_umdCallback = 0; ret(c, 0); });
 
     // ---- scePower / sceImpose / sceRtc
     registerHle("scePowerRegisterCallback", [](Ctx* c) { ret(c, 0); });

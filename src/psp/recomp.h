@@ -76,6 +76,7 @@ void rt_swl(Ctx* c, uint32_t addr, uint32_t v);
 void rt_swr(Ctx* c, uint32_t addr, uint32_t v);
 uint32_t rt_f2i(float f, int mode); /* 0 round-nearest, 1 truncate, 2 ceil, 3 floor */
 uint32_t rt_fcmp(float a, float b, int cond);
+float rt_fdiv(Ctx* c, float a, float b); /* updates the divide-by-zero bits of fcr31 */
 uint32_t rt_cfc1(Ctx* c, int reg);
 void rt_ctc1(Ctx* c, int reg, uint32_t v);
 void vfpu_exec(Ctx* c, uint32_t insn); /* every VFPU instruction, incl. loads/stores and mfv/mtv */

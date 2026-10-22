@@ -70,6 +70,8 @@ void runGuestFunction(uint32_t addr, uint32_t a0, uint32_t a1, uint32_t a2, uint
 
 // Callbacks (sceKernelCreateCallback)
 void notifyCallback(int cbid, uint32_t arg1, uint32_t arg2);
+// Runs the calling thread's notified callbacks (the "CB" waits do this). Returns how many ran.
+int runPendingCallbacks();
 
 [[noreturn]] void fatal(Ctx* c, const char* fmt, ...);
 void log(const char* fmt, ...);

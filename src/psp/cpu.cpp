@@ -36,26 +36,35 @@ void rt_divu(Ctx* c, uint32_t a, uint32_t b) {
     }
 }
 
+static inline void checkAddr(Ctx* c, uint32_t addr, const char* what) {
+    if ((addr & psp::kAddrMask) + 4 > psp::kMemSize)
+        psp::kernel::fatal(c, "%s outside guest memory: %08x", what, addr);
+}
+
 // Unaligned word access, little-endian MIPS semantics.
 uint32_t rt_lwl(Ctx* c, uint32_t addr, uint32_t old) {
+    checkAddr(c, addr, "lwl");
     uint32_t shift = (addr & 3) * 8;
     uint32_t mem = psp::read32(addr & ~3u);
     return (old & (0x00FFFFFFu >> shift)) | (mem << (24 - shift));
 }
 
 uint32_t rt_lwr(Ctx* c, uint32_t addr, uint32_t old) {
+    checkAddr(c, addr, "lwr");
     uint32_t shift = (addr & 3) * 8;
     uint32_t mem = psp::read32(addr & ~3u);
     return (old & (0xFFFFFF00u << (24 - shift))) | (mem >> shift);
 }
 
 void rt_swl(Ctx* c, uint32_t addr, uint32_t v) {
+    checkAddr(c, addr, "swl");
     uint32_t shift = (addr & 3) * 8;
     uint32_t mem = psp::read32(addr & ~3u);
     psp::write32(addr & ~3u, (mem & (0xFFFFFF00u << shift)) | (v >> (24 - shift)));
 }
 
 void rt_swr(Ctx* c, uint32_t addr, uint32_t v) {
+    checkAddr(c, addr, "swr");
     uint32_t shift = (addr & 3) * 8;
     uint32_t mem = psp::read32(addr & ~3u);
     psp::write32(addr & ~3u, (mem & (0x00FFFFFFu >> (24 - shift))) | (v << shift));
@@ -86,6 +95,18 @@ uint32_t rt_fcmp(float a, float b, int cond) {
     if (unordered) return (cond & 1) ? 1 : 0;
     bool eq = a == b, lt = a < b;
     return ((cond & 2) && eq) || ((cond & 4) && lt) ? 1 : 0;
+}
+
+// div.s: IEEE divide-by-zero (finite non-zero / 0) sets the Cause bit, and the sticky Flag bit
+// when the trap is masked; fcr31 bits as in PPSSPP Core/MIPS/Interpreter.cpp.
+float rt_fdiv(Ctx* c, float a, float b) {
+    const uint32_t kFlag = 1u << 5, kEnable = 1u << 10, kCause = 1u << 15;
+    c->fcr31 &= ~kCause;
+    if (b == 0.0f && a != 0.0f && std::isfinite(a)) {
+        c->fcr31 |= kCause;
+        if (!(c->fcr31 & kEnable)) c->fcr31 |= kFlag;
+    }
+    return a / b;
 }
 
 uint32_t rt_cfc1(Ctx* c, int reg) {

@@ -139,10 +139,15 @@ class Gen:
         if mn == "mtc1": return "FI(%d) = R(%d);" % (fs, rt)
         if mn == "cfc1": return T("rt_cfc1(c, %d)" % fs)
         if mn == "ctc1": return "rt_ctc1(c, %d, R(%d));" % (fs, rt)
-        fpu = {"add.s": "F(%d) + F(%d)", "sub.s": "F(%d) - F(%d)", "mul.s": "F(%d) * F(%d)",
-               "div.s": "F(%d) / F(%d)"}
+        fpu = {"add.s": "F(%d) + F(%d)", "sub.s": "F(%d) - F(%d)"}
         if mn in fpu: return "F(%d) = %s;" % (fd, fpu[mn] % (fs, ft))
-        if mn == "sqrt.s": return "F(%d) = sqrtf(F(%d));" % (fd, fs)
+        # Hardware details below follow PPSSPP's verified interpreter (cpu/fpu tests).
+        if mn == "mul.s":  # inf * 0 gives a positive NaN
+            return ("{ float a = F(%d), b = F(%d); if ((isinf(a) && b == 0.0f) || (isinf(b) && a == 0.0f)) "
+                    "FI(%d) = 0x7FC00000u; else F(%d) = a * b; }" % (fs, ft, fd, fd))
+        if mn == "div.s": return "F(%d) = rt_fdiv(c, F(%d), F(%d));" % (fd, fs, ft)
+        if mn == "sqrt.s":  # a negative input gives a positive NaN
+            return "{ float a = F(%d); F(%d) = sqrtf(a); if (a < 0.0f) FI(%d) = 0x7FC00000u; }" % (fs, fd, fd)
         if mn == "abs.s": return "F(%d) = fabsf(F(%d));" % (fd, fs)
         if mn == "mov.s": return "FI(%d) = FI(%d);" % (fd, fs)
         if mn == "neg.s": return "FI(%d) = FI(%d) ^ 0x80000000u;" % (fd, fs)

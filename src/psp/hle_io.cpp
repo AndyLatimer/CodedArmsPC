@@ -144,7 +144,7 @@ void fillStat(uint32_t addr, bool dir, uint64_t size) {
 void registerIoHle() {
     registerHle("sceIoOpen", [](Ctx* c) {
         int fd = openFile(readString(A(c, 0)), A(c, 1));
-        if (fd < 0) log("sceIoOpen(%s) failed", readString(A(c, 0)).c_str());
+        log("sceIoOpen(%s, %x) -> %d", readString(A(c, 0)).c_str(), A(c, 1), fd);
         ret(c, (uint32_t)fd);
     });
     registerHle("sceIoOpenAsync", [](Ctx* c) {
@@ -170,7 +170,11 @@ void registerIoHle() {
         it->second.path = "<closing>";
         ret(c, 0);
     });
-    registerHle("sceIoRead", [](Ctx* c) { ret(c, (uint32_t)readFile((int)A(c, 0), A(c, 1), A(c, 2))); });
+    registerHle("sceIoRead", [](Ctx* c) {
+        int64_t r = readFile((int)A(c, 0), A(c, 1), A(c, 2));
+        log("sceIoRead(%d, %08x, %x) -> %lld", (int)A(c, 0), A(c, 1), A(c, 2), (long long)r);
+        ret(c, (uint32_t)r);
+    });
     registerHle("sceIoReadAsync", [](Ctx* c) {
         int fd = (int)A(c, 0);
         int64_t r = readFile(fd, A(c, 1), A(c, 2));
@@ -200,7 +204,9 @@ void registerIoHle() {
     registerHle("sceIoLseek", [](Ctx* c) {
         // fd in a0, 64-bit offset in a2:a3 (aligned register pair), whence in t0
         int64_t off = (int64_t)(((uint64_t)A(c, 3) << 32) | A(c, 2));
-        ret64(c, (uint64_t)seekFile((int)A(c, 0), off, (int)A(c, 4)));
+        int64_t r = seekFile((int)A(c, 0), off, (int)A(c, 4));
+        log("sceIoLseek(%d, %lld, %d) -> %lld", (int)A(c, 0), (long long)off, (int)A(c, 4), (long long)r);
+        ret64(c, (uint64_t)r);
     });
     registerHle("sceIoLseekAsync", [](Ctx* c) {
         int fd = (int)A(c, 0);
@@ -283,10 +289,24 @@ void registerIoHle() {
         ret(c, std::rename(hostPath(r1).c_str(), hostPath(r2).c_str()) == 0 ? 0 : ERR_NOFILE);
     });
     registerHle("sceIoDevctl", [](Ctx* c) {
+        // Memory stick commands follow PPSSPP (Core/HLE/sceIo.cpp); the card is always inserted.
         std::string dev = readString(A(c, 0));
-        uint32_t cmd = A(c, 1), out = A(c, 4), outLen = A(c, 5);
-        log("sceIoDevctl(%s, %08x)", dev.c_str(), cmd);
-        if (out && outLen >= 4) write32(out, 0);
+        uint32_t cmd = A(c, 1), arg = A(c, 2), out = A(c, 4), outLen = A(c, 5);
+        switch (cmd) {
+        case 0x02015804: // register insert/eject callback: notify "inserted" right away
+            if (arg) notifyCallback((int)read32(arg), 1, 1);
+            break;
+        case 0x02025801: // driver status: 4 = device inserted
+            if (out && outLen >= 4) write32(out, 4);
+            break;
+        case 0x02025806: // inserted? 1 = yes
+            if (out && outLen >= 4) write32(out, 1);
+            break;
+        default:
+            log("sceIoDevctl(%s, %08x) unhandled", dev.c_str(), cmd);
+            if (out && outLen >= 4) write32(out, 0);
+            break;
+        }
         ret(c, 0);
     });
 }
