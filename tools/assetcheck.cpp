@@ -110,6 +110,21 @@ int main(int argc, char** argv) {
         std::printf("%s: %zu entries\n", name, entries.size());
         for (auto& e : entries) walk({arc.data() + e.offset, e.size}, std::string(name) + "/" + e.name, st, 0);
     }
+    int snaps = 0, snapsOk = 0;
+    {
+        Bytes arc;
+        std::vector<NamedEntry> entries;
+        iso.readFile("PSP_GAME/USRDIR/Arc/MAIN.ARC", arc);
+        parseArc(arc, entries);
+        for (auto& e : entries)
+            if (e.name.find(".RLVSNAP") != std::string::npos) {
+                ++snaps;
+                RlvSnapshot snap;
+                if (parseRlvSnapshot({arc.data() + e.offset, e.size}, snap)) ++snapsOk;
+                else st.failures[e.name] = "snapshot parse";
+            }
+    }
+    std::printf("level snapshots: %d (%d parsed)\n", snaps, snapsOk);
     std::printf("models: %d (%d failed), meshes %d, triangles %d\n", st.models, st.modelsFailed, st.meshes, st.tris);
     std::printf("texture images: %d (%d failed)\n", st.images, st.imagesFailed);
     for (auto& [p, e] : st.failures) std::printf("  FAIL %s: %s\n", p.c_str(), e.c_str());

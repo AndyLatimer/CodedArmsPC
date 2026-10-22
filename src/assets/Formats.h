@@ -82,6 +82,7 @@ struct ModelVertex {
 };
 struct ModelMesh {
     int texture = -1;                    // index into the owning PSPI set (see notes)
+    int flags = 0;                       // mesh header +0x38, material/blend flags (unknown)
     std::vector<ModelVertex> triangles;  // triangle list (strips already expanded)
 };
 struct Model {
@@ -89,6 +90,19 @@ struct Model {
     std::vector<ModelMesh> meshes;
 };
 bool parsePspm(ByteView v, Model& out, std::string* error = nullptr);
+
+// ---- "RLVB" level snapshot (MAIN.ARC/*.RLVSNAP) ---------------------------------------
+// A generated level stored as a cell grid (40 original units per cell on every axis)
+// plus TIBK* sections (PASS, ROOM, RAMP, LAY) that are not decoded yet.
+struct RlvSnapshot {
+    int width = 0, layers = 0, depth = 0;   // X, Y, Z cell counts
+    std::vector<uint32_t> cells;            // index = (layer * depth + z) * width + x
+    uint32_t at(int x, int layer, int z) const {
+        if (x < 0 || z < 0 || layer < 0 || x >= width || z >= depth || layer >= layers) return 0;
+        return cells[size_t((layer * depth + z) * width + x)];
+    }
+};
+bool parseRlvSnapshot(ByteView v, RlvSnapshot& out);
 
 // Decodes one PSP GE vertex of the given vertex type (GE command VTYPE). Returns the
 // stride in bytes, 0 for unsupported types. Exposed for tests.

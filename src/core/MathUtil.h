@@ -86,6 +86,20 @@ struct Mat4 {
         return r;
     }
 
+    // Rotation about +Y by `rad` followed by translation t.
+    static Mat4 rotateYTranslate(float rad, const Vec3& t) {
+        Mat4 r;
+        float c = std::cos(rad), s = std::sin(rad);
+        r.m[0] = c; r.m[2] = -s; r.m[8] = s; r.m[10] = c;
+        r.m[12] = t.x; r.m[13] = t.y; r.m[14] = t.z;
+        return r;
+    }
+
+    Vec3 transformPoint(const Vec3& p) const {
+        return {m[0] * p.x + m[4] * p.y + m[8] * p.z + m[12], m[1] * p.x + m[5] * p.y + m[9] * p.z + m[13],
+                m[2] * p.x + m[6] * p.y + m[10] * p.z + m[14]};
+    }
+
     static Mat4 translateScale(const Vec3& t, const Vec3& s) {
         Mat4 r;
         r.m[0] = s.x; r.m[5] = s.y; r.m[10] = s.z;

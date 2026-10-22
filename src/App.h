@@ -13,7 +13,7 @@ namespace ca {
 
 struct LaunchOptions {
     std::string isoPath;          // empty: from config or auto-detect
-    std::string tileset;          // e.g. DG_00
+    std::string tileset;          // e.g. DG_00 (inspection) or DG00_L_00P (assembled level)
     std::string autotestDir;      // non-empty: scripted run that writes screenshots, then exits
     bool forceProvisional = false;
     float unitsPerMeter = 0;      // 0: default
@@ -57,8 +57,12 @@ private:
     Level level_;
     CollisionWorld provisionalCollision_;
     GpuMesh provisionalMesh_;
-    std::vector<std::string> tilesets_;
-    int tilesetIndex_ = 0;
+    struct LevelEntry {
+        std::string tileset, snapshot; // empty snapshot: inspection mode (all pieces)
+    };
+    std::vector<LevelEntry> levels_;
+    int levelIndex_ = 0;
+    bool loadLevel(int index);
     GLuint logoTex_ = 0;
     int logoW_ = 0, logoH_ = 0;
 

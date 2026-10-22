@@ -204,6 +204,21 @@ bool PspiFile::decode(int i, Image& out) const {
     return true;
 }
 
+// ---- RLVB ------------------------------------------------------------------------
+
+bool parseRlvSnapshot(ByteView v, RlvSnapshot& out) {
+    if (!v.valid() || v.size < 0x58 || std::memcmp(v.data, "RLVB", 4) != 0) return false;
+    uint32_t grid = rd32(v.data + 0x2c);
+    out.width = rd16(v.data + 0x30);
+    out.layers = rd16(v.data + 0x32);
+    out.depth = rd16(v.data + 0x34);
+    size_t n = size_t(out.width) * out.layers * out.depth;
+    if (n == 0 || grid + n * 4 > v.size) return false;
+    out.cells.resize(n);
+    for (size_t i = 0; i < n; ++i) out.cells[i] = rd32(v.data + grid + i * 4);
+    return true;
+}
+
 // ---- GE vertices -------------------------------------------------------------------
 
 static int compSize(int fmt, const int sizes[4]) { return sizes[fmt & 3]; }
@@ -304,7 +319,8 @@ bool parsePspm(ByteView v, Model& out, std::string* error) {
         if (meshSize == 0 || meshAt + meshSize > v.size) break;
         uint32_t stripCount = rd16(m + 0x32);
         ModelMesh mesh;
-        mesh.texture = rd16(m + 0x38);
+        mesh.flags = rd16(m + 0x38);    // material flags (meaning not decoded yet)
+        mesh.texture = rd16(m + 0x3c);  // image index in the owning PSPI set (verified visually)
         // The first strip header follows a variable-size mesh header; locate it by
         // scanning 16-byte aligned positions for a self-consistent strip header.
         size_t at = meshAt + 0x40;

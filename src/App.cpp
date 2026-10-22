@@ -8,7 +8,7 @@
 namespace ca {
 
 static constexpr float kTickRate = 60.0f;        // simulation ticks per second (provisional, see notes)
-static constexpr float kDefaultUnitsPerMeter = 4.0f; // original units -> metres (provisional)
+static constexpr float kDefaultUnitsPerMeter = 16.0f; // original units -> metres: 40-unit cell = 2.5 m (provisional)
 static const Vec3 kClearColor{0.02f, 0.03f, 0.05f};
 
 static const float kWhite[4] = {1, 1, 1, 1};
@@ -202,20 +202,16 @@ void App::loadWorld() {
     std::string iso = opt_.forceProvisional ? "" : findIso();
     if (!iso.empty() && data_.open(iso)) {
         log::info("Game image: %s", iso.c_str());
-        tilesets_.clear();
+        levels_.clear();
+        for (const std::string& n : data_.arcEntries("MAIN.ARC")) // DGxx_[LMS]_00P.RLVSNAP
+            if (n.size() > 8 && n.compare(n.size() - 8, 8, ".RLVSNAP") == 0 && n.rfind("DG", 0) == 0)
+                levels_.push_back({"DG_" + n.substr(2, 2), n.substr(0, n.size() - 8)});
         for (const std::string& n : data_.arcEntries("DG.ARC"))
-            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".BPX") == 0) tilesets_.push_back(n.substr(0, n.size() - 4));
-        if (!opt_.tileset.empty())
-            for (size_t i = 0; i < tilesets_.size(); ++i)
-                if (tilesets_[i] == opt_.tileset) tilesetIndex_ = int(i);
-        std::string err;
-        float upm = opt_.unitsPerMeter > 0 ? opt_.unitsPerMeter : kDefaultUnitsPerMeter;
-        if (!tilesets_.empty() && original_.load(data_, renderer_, tilesets_[size_t(tilesetIndex_)], upm, err)) {
-            useOriginal_ = true;
-            player_.spawn(original_.suggestedSpawn(), 0);
-        } else {
-            log::warn("Could not load original geometry (%s); using provisional level", err.c_str());
-        }
+            if (n.size() > 4 && n.compare(n.size() - 4, 4, ".BPX") == 0) levels_.push_back({n.substr(0, n.size() - 4), ""});
+        for (size_t i = 0; i < levels_.size(); ++i)
+            if (!opt_.tileset.empty() && (levels_[i].snapshot == opt_.tileset || (levels_[i].snapshot.empty() && levels_[i].tileset == opt_.tileset)))
+                levelIndex_ = int(i);
+        useOriginal_ = !levels_.empty() && loadLevel(levelIndex_);
         // Original title logo, used in the pause menu (MAIN.ARC/TPP_TITLE.BPX, image 1).
         if (!logoTex_) {
             Image logo;
@@ -230,6 +226,28 @@ void App::loadWorld() {
         log::warn("No game image found: put your Coded Arms ISO at game/CodedArms.iso or set [game] iso= in config.ini");
     }
     if (!useOriginal_) buildProvisionalWorld();
+}
+
+bool App::loadLevel(int index) {
+    const LevelEntry& L = levels_[size_t(index)];
+    float upm = opt_.unitsPerMeter > 0 ? opt_.unitsPerMeter : kDefaultUnitsPerMeter;
+    std::string err;
+    bool ok = (original_.tileset() == L.tileset && original_.instanceCount() > 0) ||
+              original_.loadTileset(data_, renderer_, L.tileset, upm, err);
+    if (ok) {
+        if (L.snapshot.empty()) original_.showAllPieces();
+        else ok = original_.buildFromSnapshot(data_, L.snapshot, err);
+    }
+    if (!ok) {
+        log::warn("Could not load %s (%s)", L.snapshot.empty() ? L.tileset.c_str() : L.snapshot.c_str(), err.c_str());
+        return false;
+    }
+    player_.spawn(original_.suggestedSpawn(), original_.suggestedYaw());
+    noclip_ = L.snapshot.empty(); // inspection mode starts with the free camera
+    flyPos_ = flyPrev_ = player_.eye(1.0f);
+    status_ = original_.description();
+    statusTime_ = 3;
+    return true;
 }
 
 void App::buildProvisionalWorld() {
@@ -382,7 +400,7 @@ void App::drawHud() {
                       "FPS %.0f (%.2f ms)  ticks %llu\npos %.2f %.2f %.2f  grounded %d  %s\nworld: %s  tris %zu\ninput: %s %s\nGL: %s",
                       fps_, frameMs_, (unsigned long long)tickCount_, p.x, p.y, p.z, player_.grounded() ? 1 : 0,
                       noclip_ ? "[free cam]" : "",
-                      useOriginal_ ? ("ORIGINAL " + original_.tileset()).c_str() : "PROVISIONAL (no game image)",
+                      useOriginal_ ? ("ORIGINAL " + original_.description()).c_str() : "PROVISIONAL (no game image)",
                       useOriginal_ ? original_.triangleCount() : provisionalCollision_.triangleCount(),
                       input_.lastDevice() == InputDevice::Gamepad ? "gamepad" : "keyboard/mouse",
                       input_.hasGamepad() ? ("[" + input_.gamepadName() + "]").c_str() : "",
@@ -428,7 +446,7 @@ void App::drawMenu() {
         case MFilter: label = std::string("Texture filter: ") + kFilterNamesUi[int(settings_.textureFilter)]; break;
         case MRumble: label = std::string("Controller vibration: ") + (settings_.rumble ? "On" : "Off"); break;
         case MVolume: std::snprintf(v, sizeof(v), "Master volume: %d%%", int(settings_.masterVolume * 100 + 0.5f)); label = v; break;
-        case MTileset: label = "Stage tile set: " + (useOriginal_ ? original_.tileset() : std::string("(no game image)")); break;
+        case MTileset: label = "Level: " + (useOriginal_ ? original_.description() : std::string("(no game image)")); break;
         case MQuit: label = "Quit"; break;
         }
         float y = top + i * rowH;
@@ -495,11 +513,10 @@ void App::menuInput() {
     case MRumble: settings_.rumble = !settings_.rumble; input_.applySettings(settings_); if (settings_.rumble) input_.rumble(0.5f, 0.5f, 150); break;
     case MVolume: settings_.masterVolume += 0.1f * delta; break;
     case MTileset:
-        if (useOriginal_ && !tilesets_.empty()) {
-            tilesetIndex_ = (tilesetIndex_ + int(tilesets_.size()) + delta) % int(tilesets_.size());
-            std::string err;
-            float upm = opt_.unitsPerMeter > 0 ? opt_.unitsPerMeter : kDefaultUnitsPerMeter;
-            if (original_.load(data_, renderer_, tilesets_[size_t(tilesetIndex_)], upm, err)) player_.spawn(original_.suggestedSpawn(), player_.yaw);
+        if (useOriginal_ && !levels_.empty()) {
+            int n = int(levels_.size());
+            levelIndex_ = (levelIndex_ + n + delta) % n;
+            loadLevel(levelIndex_);
         }
         break;
     case MQuit: if (accept) running_ = false; return;
