@@ -1,5 +1,6 @@
 #include "psp/gpu/gpu.h"
 #include "psp/gpu/button_glyphs.h"
+#include "psp/gpu/minimap.h"
 
 #include <algorithm>
 #include <chrono>
@@ -335,7 +336,22 @@ private:
         frame_->ops.push_back(op);
     }
 
+    // Debugging (CA_MAP_DEBUG): view matrices of the frame's 3D draws.
+    std::map<std::vector<float>, int> dbgViews_;
     void present() {
+        static const bool mapDebug = std::getenv("CA_MAP_DEBUG") != nullptr;
+        if (mapDebug && !dbgViews_.empty()) {
+            std::string line = "[MAPDBG]";
+            for (auto& [v, n] : dbgViews_) {
+                float c[3];
+                for (int k = 0; k < 3; ++k) c[k] = -(v[3 * k] * v[9] + v[3 * k + 1] * v[10] + v[3 * k + 2] * v[11]);
+                char b[160];
+                std::snprintf(b, sizeof b, " [%d draws cam %.1f,%.1f,%.1f fwd %.2f,%.2f,%.2f]", n, c[0], c[1], c[2], v[2], v[5], v[8]);
+                line += b;
+            }
+            std::fprintf(stderr, "%s\n", line.c_str());
+            dbgViews_.clear();
+        }
         if (displayAddr_ && isVram(displayAddr_)) {
             FboInfo& f = fboFor(vramKey(displayAddr_), displayStride_, displayFormat_, 480, 272);
             flushMemDirty(f);
@@ -356,6 +372,7 @@ private:
             for (auto& [k, fb] : fbos_) fb.drawnSincePresent = false;
         }
         frame_->number = ++frameNumber_;
+        minimap::endFrame();
         {
             ScopedUs waitPerf(g_perf.waitUs);
             std::unique_lock<std::mutex> lk(g_queueMutex);
@@ -1027,6 +1044,9 @@ void Recorder::drawPatch(uint32_t data, bool spline) {
         patchCache_[key] = tess;
     }
     if (tess->verts.empty()) return;
+    if (!fmt.through)
+        minimap::addDraw(key, std::shared_ptr<const std::vector<Vertex>>(tess, &tess->verts), tess->prim, mtx_.world,
+                         mtx_.view, false);
     std::vector<Vertex> out = tess->verts;
     emit(out, tess->prim, fmt.through, fmt.col != 0);
 }
@@ -1056,11 +1076,17 @@ void Recorder::draw(uint32_t data) {
     dctx_.mtx = &mtx_;
     std::vector<Vertex> vin((size_t)count);
     for (int i = 0; i < count; ++i) decodeVertex(fmt, dctx_, vbase, indices[i], vin[i]);
+    if (!fmt.through && prim >= PRIM_TRIANGLES && prim <= PRIM_TRIANGLE_FAN) {
+        uint64_t key = hashBytes(reinterpret_cast<const uint8_t*>(vin.data()), vin.size() * sizeof(Vertex));
+        minimap::addDraw(key, std::make_shared<const std::vector<Vertex>>(vin), prim, mtx_.world, mtx_.view, fmt.weight != 0);
+    }
     emit(vin, prim, fmt.through, fmt.col != 0);
 }
 
 void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasColor) {
     const int count = (int)vin.size();
+    static const bool mapDebug = std::getenv("CA_MAP_DEBUG") != nullptr;
+    if (mapDebug && !through) dbgViews_[std::vector<float>(mtx_.view, mtx_.view + 12)]++;
     FboInfo& target = prepareTarget();
     const bool clear = reg(CMD_CLEARMODE) & 1;
 

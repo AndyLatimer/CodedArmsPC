@@ -22,6 +22,7 @@
 #include "platform/Input.h"
 #include "psp/gpu/button_glyphs.h"
 #include "psp/gpu/gpu.h"
+#include "psp/gpu/minimap.h"
 #include "psp/host.h"
 #include "psp/host_dialog.h"
 #include "psp/kernel.h"
@@ -61,6 +62,10 @@ struct FrontSettings {
     bool stretch = false;
     int widescreen = 1;     // 1: widen the view to the window's aspect (Hor+); 0: original 480x272
     bool pcButtonHints = true; // PC keys in place of the PSP button symbols
+    bool minimap = false;      // the port's minimap (work in progress, off by default; N toggles it)
+    float minimapSize = 0.30f; // fraction of the picture's height
+    float minimapRange = 160;  // world units from the centre to the edge
+    int minimapCorner = 0;     // 0 bottom left (above the health bar), 1 top right (below the game's radar)
     int frameRate = 60;     // 60 or 30 (fixed per screen); 0 = the game's own (20 fps in missions)
     float volume = 1.0f;
     float deadzone = 0.2f;
@@ -110,6 +115,10 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.widescreen = (int)getF(ini, "video", "widescreen", 1);
     s.frameRate = (int)getF(ini, "video", "frame_rate", 60);
     s.pcButtonHints = getF(ini, "video", "pc_button_hints", 1) != 0;
+    s.minimap = getF(ini, "video", "minimap", 0) != 0;
+    s.minimapSize = std::clamp(getF(ini, "video", "minimap_size", 0.30f), 0.1f, 0.6f);
+    s.minimapRange = std::clamp(getF(ini, "video", "minimap_range", 160.0f), 40.0f, 1000.0f);
+    s.minimapCorner = (int)getF(ini, "video", "minimap_corner", 0) == 1 ? 1 : 0;
     s.volume = getF(ini, "audio", "volume", 1.0f);
     s.deadzone = getF(ini, "input", "deadzone", 0.2f);
     s.mouseLookMode = (int)getF(ini, "input", "mouse_look", 1);
@@ -146,6 +155,10 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
     ini.set("video", "widescreen", std::to_string(s.widescreen));
     ini.set("video", "frame_rate", std::to_string(s.frameRate));
     ini.set("video", "pc_button_hints", s.pcButtonHints ? "1" : "0");
+    ini.set("video", "minimap", s.minimap ? "1" : "0");
+    ini.set("video", "minimap_size", std::to_string(s.minimapSize));
+    ini.set("video", "minimap_range", std::to_string(s.minimapRange));
+    ini.set("video", "minimap_corner", std::to_string(s.minimapCorner));
     ini.set("audio", "volume", std::to_string(s.volume));
     ini.set("input", "deadzone", std::to_string(s.deadzone));
     ini.set("input", "mouse_look", std::to_string(s.mouseLookMode));
@@ -458,6 +471,17 @@ int main(int argc, char** argv) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     uint64_t overlaySerial = ~0ull;
+    constexpr int kMapPx = 256;
+    GLuint mapTex = 0;
+    glGenTextures(1, &mapTex);
+    glBindTexture(GL_TEXTURE_2D, mapTex);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, kMapPx, kMapPx, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    std::vector<uint32_t> mapPx;
+    psp::gpu::minimap::setEnabled(s.minimap);
     std::vector<uint32_t> overlayPx;
     GLuint vao = 0;
     glGenVertexArrays(1, &vao);
@@ -509,6 +533,9 @@ int main(int argc, char** argv) {
                     (e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))) {
                     bool fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
                     SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                } else if (e.key.keysym.scancode == SDL_SCANCODE_N && !e.key.repeat) {
+                    s.minimap = !s.minimap;
+                    psp::gpu::minimap::setEnabled(s.minimap);
                 } else if (e.key.keysym.scancode == SDL_SCANCODE_F10) {
                     SDL_SetRelativeMouseMode(SDL_GetRelativeMouseMode() ? SDL_FALSE : SDL_TRUE);
                 }
@@ -583,7 +610,34 @@ int main(int argc, char** argv) {
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         }
         psp::host::DialogView dialog;
-        if (psp::host::currentDialog(dialog)) {
+        const bool dialogUp = psp::host::currentDialog(dialog);
+        if (haveFrame && s.minimap && !dialogUp && psp::gpu::minimap::render(mapPx, kMapPx, s.minimapRange)) {
+            // Bottom left of the picture, above the game's health bar.
+            float aspect = (frame.width * frame.u1) / std::max(1.0f, frame.height * frame.v1), wa = (float)dw / (float)std::max(dh, 1);
+            float sx = 1, sy = 1;
+            if (!s.stretch) { if (wa > aspect) sx = aspect / wa; else sy = wa / aspect; }
+            const float hNdc = 2 * sy * s.minimapSize;              // map height in NDC
+            const float wNdc = hNdc * (float)dh / (float)std::max(dw, 1); // square on screen
+            const float marginX = 0.02f * 2 * sy * (float)dh / (float)std::max(dw, 1);
+            float x0 = -sx + marginX, y0 = -sy + 2 * sy * 0.10f;
+            if (s.minimapCorner == 1) { // top right, below the game's own radar (about 30% down)
+                x0 = sx - marginX - wNdc;
+                y0 = sy - 2 * sy * 0.32f - hNdc;
+            }
+            glBindTexture(GL_TEXTURE_2D, mapTex);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, kMapPx, kMapPx, GL_RGBA, GL_UNSIGNED_BYTE, mapPx.data());
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            glUseProgram(overlayProg);
+            glUniform4f(glGetUniformLocation(overlayProg, "uRect"), x0, y0 + hNdc, x0 + wNdc, y0);
+            glUniform2f(glGetUniformLocation(overlayProg, "uUV1"), 1.0f, 1.0f);
+            glUniform1i(glGetUniformLocation(overlayProg, "uTex"), 0);
+            glActiveTexture(GL_TEXTURE0);
+            glBindVertexArray(vao);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glDisable(GL_BLEND);
+        }
+        if (dialogUp) {
             if (dialog.serial != overlaySerial) {
                 const bool cross = dialog.crossConfirms;
                 ca::DialogKeys keys{keyName(s.bindings[cross ? IN_CROSS : IN_CIRCLE]), keyName(s.bindings[cross ? IN_CIRCLE : IN_CROSS]),

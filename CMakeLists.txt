@@ -86,6 +86,7 @@ add_library(ca_psp OBJECT
   src/psp/ge.cpp
   src/psp/gpu/gpu.cpp
   src/psp/gpu/button_glyphs.cpp
+  src/psp/gpu/minimap.cpp
   src/psp/gpu/vertex_decoder.cpp
   src/psp/gpu/texture_decoder.cpp
   src/render/GL.cpp

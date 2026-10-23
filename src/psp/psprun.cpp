@@ -31,6 +31,7 @@
 #include "psp/ge.h"
 #include "psp/gpu/gpu.h"
 #include "psp/gpu/button_glyphs.h"
+#include "psp/gpu/minimap.h"
 #include "render/GL.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
@@ -241,6 +242,10 @@ void controlThread(std::string path) {
                 std::sscanf(l.c_str(), "%*s %d %d", &x, &y);
                 psp::host::g_ctrl.lx = (uint8_t)x;
                 psp::host::g_ctrl.ly = (uint8_t)y;
+            } else if (c == "mapshot") { // mapshot FILE: the minimap (256 px, 150 units)
+                std::vector<uint32_t> px;
+                if (psp::gpu::minimap::render(px, 256, 150.0f)) stbi_write_png(arg, 256, 256, 4, px.data(), 256 * 4);
+                else std::fprintf(stderr, "[CTL] mapshot: no map\n");
             } else if (c == "shot") {
                 std::lock_guard<std::mutex> lk(g_ctlMutex);
                 g_ctlShots.push_back(arg);
