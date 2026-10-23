@@ -242,6 +242,8 @@ void controlThread(std::string path) {
                 std::sscanf(l.c_str(), "%*s %d %d", &x, &y);
                 psp::host::g_ctrl.lx = (uint8_t)x;
                 psp::host::g_ctrl.ly = (uint8_t)y;
+            } else if (c == "ads") { // ads 0|1: aim down sights
+                psp::host::g_ads = std::atoi(arg) != 0;
             } else if (c == "mapshot") { // mapshot FILE: the minimap (256 px, 150 units)
                 std::vector<uint32_t> px;
                 if (psp::gpu::minimap::render(px, 256, 150.0f)) stbi_write_png(arg, 256, 256, 4, px.data(), 256 * 4);

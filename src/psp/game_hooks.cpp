@@ -23,6 +23,7 @@
 
 namespace psp::host {
 Aim g_aim;
+std::atomic<bool> g_ads{false};
 std::atomic<int> g_targetFps{0};
 }
 

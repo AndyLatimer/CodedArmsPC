@@ -51,6 +51,9 @@ struct Aim {
 };
 extern Aim g_aim;
 
+// Aim down sights is held (front end); the renderer moves the weapon to the sights (gpu/ads.h).
+extern std::atomic<bool> g_ads;
+
 // Frame rate the game is run at: 60 or 30; 0 keeps the game's own (20 fps in missions).
 // Applied when the game sets its frame interval (game_hooks.cpp).
 extern std::atomic<int> g_targetFps;

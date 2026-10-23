@@ -1,4 +1,5 @@
 #include "psp/gpu/gpu.h"
+#include "psp/gpu/ads.h"
 #include "psp/gpu/button_glyphs.h"
 #include "psp/gpu/minimap.h"
 
@@ -336,6 +337,7 @@ private:
         frame_->ops.push_back(op);
     }
 
+    AimDownSights ads_;
     // Debugging (CA_MAP_DEBUG): view matrices of the frame's 3D draws.
     std::map<std::vector<float>, int> dbgViews_;
     void present() {
@@ -372,6 +374,7 @@ private:
             for (auto& [k, fb] : fbos_) fb.drawnSincePresent = false;
         }
         frame_->number = ++frameNumber_;
+        ads_.endFrame();
         minimap::endFrame();
         {
             ScopedUs waitPerf(g_perf.waitUs);
@@ -1086,14 +1089,34 @@ void Recorder::draw(uint32_t data) {
 void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasColor) {
     const int count = (int)vin.size();
     static const bool mapDebug = std::getenv("CA_MAP_DEBUG") != nullptr;
-    if (mapDebug && !through) dbgViews_[std::vector<float>(mtx_.view, mtx_.view + 12)]++;
+    if (mapDebug && !through) {
+        dbgViews_[std::vector<float>(mtx_.view, mtx_.view + 12)]++;
+        const float* v = mtx_.view;
+        float cpos[3];
+        for (int k = 0; k < 3; ++k) cpos[k] = -(v[3 * k] * v[9] + v[3 * k + 1] * v[10] + v[3 * k + 2] * v[11]);
+        if (std::fabs(cpos[0]) + std::fabs(cpos[1]) + std::fabs(cpos[2]) < 20) { // the weapon's camera
+            float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
+            for (const Vertex& vx : vin) {
+                float w[3], e[3];
+                for (int r = 0; r < 3; ++r) w[r] = mtx_.world[r] * vx.pos[0] + mtx_.world[3 + r] * vx.pos[1] + mtx_.world[6 + r] * vx.pos[2] + mtx_.world[9 + r];
+                for (int r = 0; r < 3; ++r) e[r] = v[r] * w[0] + v[3 + r] * w[1] + v[6 + r] * w[2] + v[9 + r];
+                for (int r = 0; r < 3; ++r) { lo[r] = std::min(lo[r], e[r]); hi[r] = std::max(hi[r], e[r]); }
+            }
+            std::fprintf(stderr, "[VM] weights %d verts %zu tex %d x %.2f..%.2f y %.2f..%.2f z %.2f..%.2f\n",
+                         (int)((reg(CMD_VERTEXTYPE) >> 9) & 3), vin.size(), (int)(reg(CMD_TEXTUREMAPENABLE) & 1), lo[0], hi[0],
+                         lo[1], hi[1], lo[2], hi[2]);
+        }
+    }
     FboInfo& target = prepareTarget();
     const bool clear = reg(CMD_CLEARMODE) & 1;
 
     Op op{OP_DRAW};
     Ubo ubo;
     bool transformedRect = false;
+    if (!through) ads_.observe(mtx_.view, mtx_.world, vin);
+    else if (ads_.hide2D(vin)) return;
     buildUbo(ubo, target, through, hasColor);
+    if (!through) ads_.adjust(mtx_.view, ubo.view, ubo.proj);
     premulBlend_ = false;
     alphaOverride_ = false;
     buildState(op.st, target, through, prim);

@@ -34,22 +34,27 @@ namespace {
 
 enum PspInput {
     IN_UP, IN_DOWN, IN_LEFT, IN_RIGHT, IN_CROSS, IN_CIRCLE, IN_SQUARE, IN_TRIANGLE, IN_L, IN_R, IN_START, IN_SELECT,
-    IN_STICK_UP, IN_STICK_DOWN, IN_STICK_LEFT, IN_STICK_RIGHT, IN_COUNT
+    IN_STICK_UP, IN_STICK_DOWN, IN_STICK_LEFT, IN_STICK_RIGHT,
+    IN_ADS, // aim down sights (the port's own feature, not a PSP button)
+    IN_COUNT
 };
 const char* kInputNames[IN_COUNT] = {"up", "down", "left", "right", "cross", "circle", "square", "triangle",
-                                     "l", "r", "start", "select", "stick_up", "stick_down", "stick_left", "stick_right"};
+                                     "l", "r", "start", "select", "stick_up", "stick_down", "stick_left", "stick_right",
+                                     "aim_down_sights"};
 const uint32_t kInputButtons[12] = {
     psp::host::BTN_UP, psp::host::BTN_DOWN, psp::host::BTN_LEFT, psp::host::BTN_RIGHT, psp::host::BTN_CROSS,
     psp::host::BTN_CIRCLE, psp::host::BTN_SQUARE, psp::host::BTN_TRIANGLE, psp::host::BTN_LTRIGGER,
     psp::host::BTN_RTRIGGER, psp::host::BTN_START, psp::host::BTN_SELECT};
 // Defaults follow the game's control type A: analog = move, triangle/cross/square/circle =
 // look up/look down/turn left/turn right (also driven by the mouse), up = zoom, down = reload,
-// left/right = previous/next weapon, R = attack, L = jump, select = pause, start = map.
+// left/right = previous/next weapon, R = attack, L = jump, select = pause, start = map. The
+// right mouse button / left trigger aim down sights; the game's zoom moved to the middle button.
 const char* kDefaultBindings[IN_COUNT] = {
-    "key:Up, mouse:right, pad:dpup", "key:Down, key:R, pad:dpdown", "key:Left, key:Q, mouse:wheeldown, pad:dpleft",
+    "key:Up, mouse:middle, pad:dpup", "key:Down, key:R, pad:dpdown", "key:Left, key:Q, mouse:wheeldown, pad:dpleft",
     "key:Right, key:E, mouse:wheelup, pad:dpright", "key:Return, key:K, pad:a", "key:Backspace, key:L, pad:b",
-    "key:J, pad:x", "key:I, pad:y", "key:Space, pad:leftshoulder, pad:lefttrigger", "mouse:left, pad:rightshoulder, pad:righttrigger",
-    "key:M, key:Tab, pad:back", "key:Escape, key:P, pad:start", "key:W", "key:S", "key:A", "key:D"};
+    "key:J, pad:x", "key:I, pad:y", "key:Space, pad:leftshoulder", "mouse:left, pad:rightshoulder, pad:righttrigger",
+    "key:M, key:Tab, pad:back", "key:Escape, key:P, pad:start", "key:W", "key:S", "key:A", "key:D",
+    "mouse:right, pad:lefttrigger"};
 
 struct FrontSettings {
     std::string iso;
@@ -74,6 +79,8 @@ struct FrontSettings {
     bool invertY = false;
     std::string lookUp = "triangle", lookDown = "cross", lookLeft = "square", lookRight = "circle";
     bool mouseLook = true;
+    float adsSens = 0.6f;    // look sensitivity while aiming down sights
+    bool adsToggle = false;  // aim down sights: hold (false) or toggle (true)
     int mouseLookMode = 1;   // 0 off, 1 direct aim, 2 look buttons
     float deadzoneRight = 0.15f, padCurve = 1.6f, padTurnRate = 3.0f; // rad/s at full deflection
     float padSensX = 1.0f, padSensY = 0.8f;
@@ -133,11 +140,17 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.padInvertY = getF(ini, "input", "pad_invert_y", 0) != 0;
     s.mouseSensX = getF(ini, "input", "mouse_sens_x", 1.0f);
     s.mouseSensY = getF(ini, "input", "mouse_sens_y", 1.0f);
+    s.adsSens = std::clamp(getF(ini, "input", "ads_sensitivity", 0.6f), 0.1f, 2.0f);
+    s.adsToggle = getF(ini, "input", "ads_toggle", 0) != 0;
     s.invertY = getF(ini, "input", "invert_y", 0) != 0;
     for (int i = 0; i < IN_COUNT; ++i) {
         s.bindingText[i] = ini.get("bindings", kInputNames[i], kDefaultBindings[i]);
-        if (i == IN_CIRCLE && s.bindingText[i] == "key:L, key:Backspace, pad:b") // earlier default: Backspace
-            s.bindingText[i] = kDefaultBindings[i];                               // first for the button hints
+        // Earlier defaults: Backspace first for the button hints; the right button and the left
+        // trigger now aim down sights (the zoom moved to the middle button).
+        if ((i == IN_CIRCLE && s.bindingText[i] == "key:L, key:Backspace, pad:b") ||
+            (i == IN_UP && s.bindingText[i] == "key:Up, mouse:right, pad:dpup") ||
+            (i == IN_L && s.bindingText[i] == "key:Space, pad:leftshoulder, pad:lefttrigger"))
+            s.bindingText[i] = kDefaultBindings[i];
         parseList(s.bindingText[i], s.bindings[i]);
     }
 }
@@ -162,6 +175,8 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
     ini.set("audio", "volume", std::to_string(s.volume));
     ini.set("input", "deadzone", std::to_string(s.deadzone));
     ini.set("input", "mouse_look", std::to_string(s.mouseLookMode));
+    ini.set("input", "ads_sensitivity", std::to_string(s.adsSens));
+    ini.set("input", "ads_toggle", s.adsToggle ? "1" : "0");
     ini.set("input", "invert_x", s.invertX ? "1" : "0");
     ini.set("input", "deadzone_right", std::to_string(s.deadzoneRight));
     ini.set("input", "pad_look_curve", std::to_string(s.padCurve));
@@ -182,6 +197,10 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
 struct InputState {
     SDL_GameController* pad = nullptr;
     float lookAccumX = 0, lookAccumY = 0;
+    bool adsOn = false, adsWasHeld = false;
+    // Mouse buttons from SDL events (more reliable than polling in relative mode); `mouseClicked`
+    // keeps presses released before the next frame so short clicks are not lost.
+    Uint32 mouseHeld = 0, mouseClicked = 0;
     bool wheelUp = false, wheelDown = false;
 };
 
@@ -208,13 +227,25 @@ constexpr float kRadiansPerCount = 0.0022f;
 
 void updateController(const FrontSettings& s, InputState& in, bool focused, float dt) {
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
-    Uint32 mouse = focused ? SDL_GetMouseState(nullptr, nullptr) : 0;
+    Uint32 mouse = focused ? (in.mouseHeld | in.mouseClicked) : 0;
+    in.mouseClicked = 0;
     uint32_t buttons = 0;
     bool held[IN_COUNT] = {};
     for (int i = 0; i < IN_COUNT; ++i)
         for (const auto& b : s.bindings[i])
             if (bindingHeld(b, in, keys, mouse)) held[i] = true;
     for (int i = 0; i < 12; ++i) if (held[i]) buttons |= kInputButtons[i];
+
+    // Aim down sights (drawn by the renderer, gpu/ads.h); slower look while aiming.
+    if (s.adsToggle) {
+        if (held[IN_ADS] && !in.adsWasHeld) in.adsOn = !in.adsOn;
+    } else {
+        in.adsOn = held[IN_ADS];
+    }
+    in.adsWasHeld = held[IN_ADS];
+    if (!focused) in.adsOn = false;
+    psp::host::g_ads = in.adsOn;
+    const float lookScale = in.adsOn ? s.adsSens : 1.0f;
 
     // Analog stick: gamepad left stick, or the digital stick bindings.
     float ax = 0, ay = 0;
@@ -234,8 +265,8 @@ void updateController(const FrontSettings& s, InputState& in, bool focused, floa
             float k = std::pow(mag, s.padCurve) / mag;
             std::lock_guard<std::mutex> lk(psp::host::g_aim.m);
             psp::host::g_aim.enabled = true;
-            psp::host::g_aim.yaw += r.x * k * s.padTurnRate * s.padSensX * dt * (s.padInvertX ? -1.0f : 1.0f);
-            psp::host::g_aim.pitch += r.y * k * s.padTurnRate * s.padSensY * dt * (s.padInvertY ? -1.0f : 1.0f);
+            psp::host::g_aim.yaw += r.x * k * s.padTurnRate * s.padSensX * lookScale * dt * (s.padInvertX ? -1.0f : 1.0f);
+            psp::host::g_aim.pitch += r.y * k * s.padTurnRate * s.padSensY * lookScale * dt * (s.padInvertY ? -1.0f : 1.0f);
         }
     }
     if (held[IN_STICK_LEFT]) ax = -1;
@@ -252,8 +283,8 @@ void updateController(const FrontSettings& s, InputState& in, bool focused, floa
     if (s.mouseLookMode == 1 && focused && SDL_GetRelativeMouseMode()) {
         std::lock_guard<std::mutex> lk(psp::host::g_aim.m);
         psp::host::g_aim.enabled = true;
-        psp::host::g_aim.yaw += in.lookAccumX * kRadiansPerCount;
-        psp::host::g_aim.pitch += in.lookAccumY * kRadiansPerCount;
+        psp::host::g_aim.yaw += in.lookAccumX * kRadiansPerCount * lookScale;
+        psp::host::g_aim.pitch += in.lookAccumY * kRadiansPerCount * lookScale;
         in.lookAccumX = in.lookAccumY = 0;
     } else if (s.mouseLookMode == 2 && focused && SDL_GetRelativeMouseMode()) {
         auto press = [&](const std::string& n) { int k = inputIndex(n); if (k >= 0) buttons |= kInputButtons[k]; };
@@ -267,6 +298,11 @@ void updateController(const FrontSettings& s, InputState& in, bool focused, floa
     }
     in.wheelUp = in.wheelDown = false;
 
+    static const bool inputDebug = std::getenv("CA_INPUT_DEBUG") != nullptr;
+    static bool lastAds = false;
+    if (inputDebug && (buttons != psp::host::g_ctrl.buttons.load() || in.adsOn != lastAds))
+        std::fprintf(stderr, "[INPUT] buttons %08x ads %d focused %d\n", buttons, (int)in.adsOn, (int)focused);
+    lastAds = in.adsOn;
     psp::host::g_ctrl.buttons = buttons;
     psp::host::g_ctrl.lx = (uint8_t)std::clamp((int)std::lround(128 + ax * 127), 0, 255);
     psp::host::g_ctrl.ly = (uint8_t)std::clamp((int)std::lround(128 + ay * 127), 0, 255);
@@ -546,6 +582,13 @@ int main(int argc, char** argv) {
                     in.lookAccumY += e.motion.yrel * s.mouseSensY * (s.invertY ? -1.0f : 1.0f);
                 }
                 break;
+            case SDL_MOUSEBUTTONDOWN:
+                in.mouseHeld |= SDL_BUTTON(e.button.button);
+                in.mouseClicked |= SDL_BUTTON(e.button.button);
+                break;
+            case SDL_MOUSEBUTTONUP:
+                in.mouseHeld &= ~SDL_BUTTON(e.button.button);
+                break;
             case SDL_MOUSEWHEEL:
                 if (e.wheel.y > 0) in.wheelUp = true;
                 if (e.wheel.y < 0) in.wheelDown = true;
@@ -561,7 +604,7 @@ int main(int argc, char** argv) {
                 break;
             case SDL_WINDOWEVENT:
                 if (e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) focused = true;
-                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) focused = false;
+                if (e.window.event == SDL_WINDOWEVENT_FOCUS_LOST) { focused = false; in.mouseHeld = 0; }
                 break;
             }
         }
