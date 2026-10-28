@@ -258,6 +258,8 @@ void controlThread(std::string path) {
                 int n2 = std::sscanf(l.c_str(), "%*s %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
                 psp::host::g_dev.enabled = v[0] != 0;
                 if (n2 == 6) for (int i = 0; i < 5; ++i) psp::host::g_dev.loadout[i] = v[i + 1];
+            } else if (c == "devcycle") { // devcycle 1|-1: next / previous weapon in place of the current one
+                psp::host::g_dev.cycle = std::atoi(arg);
             } else if (c == "ads") { // ads 0|1: aim down sights
                 psp::host::g_ads = std::atoi(arg) != 0;
             } else if (c == "mapshot") { // mapshot FILE: the minimap (256 px, 150 units)

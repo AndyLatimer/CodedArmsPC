@@ -45,7 +45,8 @@ El código generado se crea en `build/` a partir de la ISO del usuario y nunca s
 - [x] Corrección: el alfa del framebuffer de la PSP es el stencil (solo lo cambian ZERO/REPLACE): el brillo (glow) de la misión coincide con PPSSPP.
 - [x] [RE] **60 / 30 fps** (el original va a 20 en las misiones): hook en el fijador de intervalo del juego, fijo por pantalla (`[video] frame_rate`). Ver TECHNICAL_NOTES §15: el jugador va 1,5 veces más rápido que a 20 fps; no hay 45 fps.
 - [x] Estabilidad: memoria del invitado sin accesos fuera del bloque, pila de 16 MB en Windows, registro `CodedArms.log` con informe de cierres.
-- [x] [NUEVO] **Apuntar con la mira** (clic derecho / gatillo izquierdo): el arma se lleva al centro alineando la mira, zoom ligero, sin retícula, sensibilidad reducida; el zoom del juego pasa al botón central. Verificado con la pistola.
+- [x] [NUEVO] **Apuntar con la mira** (clic derecho / gatillo izquierdo): el arma se lleva al centro alineando la mira, zoom ligero, sin retícula, sensibilidad reducida; el zoom del juego pasa al botón central. Verificado con las 23 armas; corregidos el temblor de la transición y la detección del arma (Lightning, Photon_MG, Copperhead).
+- [x] [NUEVO] **Modo dev** (`[dev] enabled=1`): todas las armas y granadas, munición infinita, F5/F6 cambian el arma actual. Verificado en el entrenamiento con las 23 armas.
 - [x] [NUEVO] **Diálogos del sistema dibujados** (cargar/guardar partida, mensajes) con teclado/mando; corregida la lista de partidas vacía en Windows.
 - [x] [NUEVO] **Teclas de PC en las ayudas de botones** (configuración de teclas, tipo de control, pies de pantalla) según las asignaciones de `config.ini` (`[video] pc_button_hints`).
 - [x] Audio sin cortes: el juego se sincroniza con el reloj de la tarjeta de sonido (0 huecos frente a ~4/min).

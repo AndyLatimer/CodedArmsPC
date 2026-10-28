@@ -7,10 +7,11 @@
 // centre of the screen, where the game's shots go, with the barrel along the line of sight;
 // narrows the field of view of the level; and hides the crosshair. The game logic is untouched.
 //
-// The weapon is told apart from the arms by its shape in its camera's space: narrow, or wholly
-// in front of the camera. Its sights are the top edge of the weapon, and the barrel direction
-// is fitted through that edge. The alignment is measured when aiming starts and then kept, so
-// the weapon's own animations (recoil) still show.
+// The weapon is told apart from the arms by their meshes (the same seven with every weapon), or
+// failing that by its shape in its camera's space: narrow, or wholly in front of the camera. Its
+// sights are the top edge of the weapon, and the barrel direction is fitted through that edge.
+// The alignment is measured when aiming starts and then kept, so the weapon's own animations
+// (recoil) still show.
 #include <cstdint>
 #include <vector>
 
@@ -36,6 +37,8 @@ private:
     double lastUs_ = 0;
     std::vector<float> gun_;        // weapon vertices this frame (view space, xyz)
     std::vector<float> front_;      // all weapon-camera vertices ahead of the hands (fallback)
+    std::vector<float> notArms_;    // weapon-camera vertices not of the arms' meshes
+    bool armsSeen_ = false;         // the arms were recognised this frame
     bool aligned_ = false;          // an alignment was measured for this aim
     size_t alignedVerts_ = 0;       // weapon vertices when it was measured
     int changed_ = 0;               // frames with a different weapon

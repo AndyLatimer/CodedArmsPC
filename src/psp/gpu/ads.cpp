@@ -53,7 +53,8 @@ bool AimDownSights::isWeaponCamera(const float* v) {
 }
 
 void AimDownSights::observe(const float view[12], const float world[12], const std::vector<Vertex>& verts) {
-    if (!isWeaponCamera(view) || verts.empty()) return;
+    // Below a dozen vertices: sprites and particles (muzzle flashes, flames), not the weapon.
+    if (!isWeaponCamera(view) || verts.size() < 12) return;
     std::vector<float> pts;
     pts.reserve(verts.size() * 3);
     float lo[3] = {1e9f, 1e9f, 1e9f}, hi[3] = {-1e9f, -1e9f, -1e9f};
@@ -63,9 +64,22 @@ void AimDownSights::observe(const float view[12], const float world[12], const s
         xform(view, w, e);
         for (int k = 0; k < 3; ++k) { lo[k] = std::min(lo[k], e[k]); hi[k] = std::max(hi[k], e[k]); pts.push_back(e[k]); }
     }
-    // The weapon: narrow, or wholly in front of the camera (the arms are wide and reach back).
-    // Fallback for other shapes: everything of the weapon camera in front of the hands' reach.
-    if (hi[0] - lo[0] < 1.2f || hi[2] < -2.0f) gun_.insert(gun_.end(), pts.begin(), pts.end());
+    // Flat (billboards) or wholly far ahead (shots, rockets): effects, not the weapon.
+    if (hi[2] - lo[2] < 0.01f || hi[2] < -9.0f) return;
+    // The player's arms are the same seven meshes with every weapon (verified with all 23 in
+    // dev mode), drawn after the weapon; the rest of the weapon camera's draws are the weapon.
+    static constexpr size_t kArmMeshes[] = {101, 186, 305, 85, 143, 61, 279};
+    const bool arm = std::find(std::begin(kArmMeshes), std::end(kArmMeshes), verts.size()) != std::end(kArmMeshes);
+    if (arm) armsSeen_ = true;
+    else notArms_.insert(notArms_.end(), pts.begin(), pts.end());
+    // Fallback when the arms are not recognised: narrow, or wholly in front of the camera (the
+    // arms are wide and reach back); failing that, everything in front of the hands' reach.
+    const bool gun = hi[0] - lo[0] < 1.2f || hi[2] < -2.0f;
+    if (gun) gun_.insert(gun_.end(), pts.begin(), pts.end());
+    static const bool dbg = std::getenv("CA_ADS_DEBUG") && std::atoi(std::getenv("CA_ADS_DEBUG")) >= 2;
+    if (dbg && host::g_ads.load())
+        std::fprintf(stderr, "[ADS] draw %zu verts x %.2f..%.2f y %.2f..%.2f z %.2f..%.2f%s\n", verts.size(), lo[0], hi[0], lo[1],
+                     hi[1], lo[2], hi[2], arm ? " arm" : "");
     for (size_t i = 0; i < pts.size(); i += 3)
         if (pts[i + 2] < -2.0f) front_.insert(front_.end(), pts.begin() + (long)i, pts.begin() + (long)i + 3);
 }
@@ -80,8 +94,11 @@ void AimDownSights::endFrame() {
     // Measure the weapon when aiming starts (from hip), then keep that alignment; measure again
     // when a different weapon appears (its vertex count changes for a few frames).
     if (want && t_ == 0) aligned_ = false;
-    if (gun_.size() < 3 * 12) gun_.swap(front_);
+    if (armsSeen_ && notArms_.size() >= 3 * 12) gun_.swap(notArms_);
+    else if (gun_.size() < 3 * 12) gun_.swap(front_);
     front_.clear();
+    notArms_.clear();
+    armsSeen_ = false;
     const size_t gunVerts = gun_.size() / 3;
     if (want && aligned_ && gunVerts) {
         const bool other = gunVerts * 4 < alignedVerts_ * 3 || gunVerts * 3 > alignedVerts_ * 4;
@@ -132,8 +149,10 @@ void AimDownSights::endFrame() {
     gun_.clear();
 
     const float target = (want && aligned_) ? 1.0f : 0.0f;
-    if (kTransitionS > 0 && dt > 0) t_ += (target > t_ ? 1 : -1) * dt / kTransitionS;
-    t_ = std::clamp(t_, 0.0f, 1.0f);
+    // Towards the target, without overshooting (stepping away from it and back made the
+    // weapon and the view shake every frame).
+    const float step = dt / kTransitionS;
+    t_ = target > t_ ? std::min(target, t_ + step) : std::max(target, t_ - step);
     if (target == 0 && t_ == 0) aligned_ = false;
 
     // M(t) = T(S + (S' - S) t) * Rx(pitch t) * Ry(yaw t) * T(-S), S' = the sight on the axis.

@@ -74,6 +74,8 @@ struct FrontSettings {
     float minimapRange = 160;  // world units from the centre to the edge
     int minimapCorner = 0;     // 0 bottom left (above the health bar), 1 top right (below the game's radar)
     int frameRate = 60;     // 60 or 30 (fixed per screen); 0 = the game's own (20 fps in missions)
+    bool dev = false;       // dev mode (testing): every weapon, endless ammo, F5/F6 change the weapon
+    std::string devLoadout = "0, 4, 6, 19, 23"; // the five weapons levels start with (ids, see LEEME)
     float volume = 1.0f;
     float deadzone = 0.2f;
     // Mouse look (until the game's camera is driven directly: mapped onto the look buttons).
@@ -128,6 +130,8 @@ void loadSettings(FrontSettings& s, ca::Ini& ini, const std::string& path) {
     s.minimapSize = std::clamp(getF(ini, "video", "minimap_size", 0.30f), 0.1f, 0.6f);
     s.minimapRange = std::clamp(getF(ini, "video", "minimap_range", 160.0f), 40.0f, 1000.0f);
     s.minimapCorner = (int)getF(ini, "video", "minimap_corner", 0) == 1 ? 1 : 0;
+    s.dev = getF(ini, "dev", "enabled", 0) != 0;
+    s.devLoadout = ini.get("dev", "loadout", s.devLoadout);
     s.volume = getF(ini, "audio", "volume", 1.0f);
     s.deadzone = getF(ini, "input", "deadzone", 0.2f);
     s.mouseLookMode = (int)getF(ini, "input", "mouse_look", 1);
@@ -174,6 +178,8 @@ void saveSettings(const FrontSettings& s, ca::Ini& ini, const std::string& path)
     ini.set("video", "minimap_size", std::to_string(s.minimapSize));
     ini.set("video", "minimap_range", std::to_string(s.minimapRange));
     ini.set("video", "minimap_corner", std::to_string(s.minimapCorner));
+    ini.set("dev", "enabled", s.dev ? "1" : "0");
+    ini.set("dev", "loadout", s.devLoadout);
     ini.set("audio", "volume", std::to_string(s.volume));
     ini.set("input", "deadzone", std::to_string(s.deadzone));
     ini.set("input", "mouse_look", std::to_string(s.mouseLookMode));
@@ -507,6 +513,13 @@ int main(int argc, char** argv) {
     psp::gpu::install(gs);
     if (s.pcButtonHints) installButtonLabels(s);
     psp::host::g_targetFps = s.frameRate >= 60 ? 60 : (s.frameRate >= 30 ? 30 : 0);
+    psp::host::g_dev.enabled = s.dev;
+    {
+        int ids[5] = {-1, -1, -1, -1, -1};
+        std::sscanf(s.devLoadout.c_str(), "%d , %d , %d , %d , %d", &ids[0], &ids[1], &ids[2], &ids[3], &ids[4]);
+        for (int i = 0; i < 5; ++i) psp::host::g_dev.loadout[i] = ids[i] >= 0 && ids[i] < 33 ? ids[i] : -1;
+        if (s.dev) std::fprintf(stderr, "[DEV] dev mode: weapons %d %d %d %d %d, F5/F6 change the weapon\n", ids[0], ids[1], ids[2], ids[3], ids[4]);
+    }
     if (!psp::gpu::renderInit()) return 1;
     GLuint blit = makeProgram(kBlitVs, kBlitFs);
     GLuint overlayProg = makeProgram(kBlitVs, kOverlayFs);
@@ -584,6 +597,8 @@ int main(int argc, char** argv) {
                 } else if (e.key.keysym.scancode == SDL_SCANCODE_N && !e.key.repeat) {
                     s.minimap = !s.minimap;
                     psp::gpu::minimap::setEnabled(s.minimap);
+                } else if (s.dev && (e.key.keysym.scancode == SDL_SCANCODE_F5 || e.key.keysym.scancode == SDL_SCANCODE_F6)) {
+                    psp::host::g_dev.cycle = e.key.keysym.scancode == SDL_SCANCODE_F6 ? 1 : -1;
                 } else if (e.key.keysym.scancode == SDL_SCANCODE_F10) {
                     SDL_SetRelativeMouseMode(SDL_GetRelativeMouseMode() ? SDL_FALSE : SDL_TRUE);
                 }

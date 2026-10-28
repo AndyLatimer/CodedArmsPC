@@ -54,10 +54,14 @@ extern Aim g_aim;
 // Aim down sights is held (front end); the renderer moves the weapon to the sights (gpu/ads.h).
 extern std::atomic<bool> g_ads;
 
-// Dev mode (front end [dev]): the weapons the player starts missions with (item ids, -1 empty).
+// Dev mode (front end [dev], game_hooks.cpp): every weapon and grenade, the five the player
+// starts levels with (weapon ids 0-22, grenades 23-32, -1 empty), endless ammo, and requests to
+// put the next (+1) or previous (-1) weapon in the place of the current one.
 struct DevMode {
     std::atomic<bool> enabled{false};
     std::atomic<int> loadout[5] = {0, 4, 6, 19, 23};
+    std::atomic<bool> infiniteAmmo{true};
+    std::atomic<int> cycle{0};
 };
 extern DevMode g_dev;
 

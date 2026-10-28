@@ -37,7 +37,12 @@ constexpr float kPi = 3.14159265f;
 
 uint32_t frameSettingsForTrace();
 
+namespace {
+void devTick(Ctx* c);
+}
+
 extern "C" void ca_hook_player_view(Ctx* c) {
+    devTick(c);
     const uint32_t view = c->r[19], input = c->r[18];
     static const bool trace = std::getenv("CA_HOOK_TRACE") != nullptr;
     static const bool perf = std::getenv("CA_PERF") != nullptr;
@@ -116,18 +121,100 @@ extern "C" void ca_hook_frame_start(Ctx* c) {
 }
 
 // Dev mode -----------------------------------------------------------------------------------
-// When a mission starts, the game computes the 5 weapon slots from the player's inventory into
-// five s16 item ids on the stack (f_08926d88) and passes them to SetLoadout (0x088612b4). The
-// hooks after the first of those loads replace them with the dev loadout. Item ids: weapons
-// 0-22, grenades 23-32 (in the order of the game's item name table, TECHNICAL_NOTES.md).
+// The player's weapons are built from the profile's inventory (TECHNICAL_NOTES.md section 21):
+// 52 entries of 3 bytes (item, equip slot 1-5 or 0, ?) at profile+0, entry i holding item i
+// (1-23 weapons, 24-33 grenades), the count of each item at profile+268+item, the weapon
+// objects at *(profile+372)[i], the number equipped (at most 5) at profile+496, the current
+// weapon at profile+156 and a requested switch at profile+500. The ammo in reserve of weapon
+// id i (item i+1) is a u32 at 0x08928c94() + 4*i (0x09bf4124 in the story mode).
 namespace {
-void devLoadout(Ctx* c, uint32_t buf, int firstReg) {
+// Runs guest function `fn` on the calling guest thread, below its stack, and returns v0.
+uint32_t callGuest(Ctx* c, uint32_t fn, uint32_t a0, uint32_t a1 = 0, uint32_t a2 = 0, uint32_t a3 = 0) {
+    Ctx sub = *c;
+    sub.r[4] = a0;
+    sub.r[5] = a1;
+    sub.r[6] = a2;
+    sub.r[7] = a3;
+    sub.r[29] = (c->r[29] - 0x40) & ~0xFu;
+    call_indirect(&sub, fn);
+    return sub.r[2];
+}
+
+bool inRam(uint32_t a) { return a >= 0x08800000 && a < 0x0A000000; }
+
+uint32_t g_devProfile = 0;            // the stocked profile (0: none yet)
+uint8_t g_devGrenades[34] = {};       // the grenade counts it was given
+
+// 0x08927620(profile, ...) sets the player's weapons up when a level starts (and 0x08927498
+// creates an object for each equipped weapon). The hook at its entry first puts every weapon
+// and grenade in the inventory with 0x08926bd4(profile, item), the game's own "add to
+// inventory" (used when an item is picked up), and equips the dev loadout.
+void devStock(Ctx* c, uint32_t profile) {
     auto& d = psp::host::g_dev;
-    if (!d.enabled) return;
-    for (int i = 0; i < 5; ++i) psp::write16(buf + 2 * i, (uint16_t)(int16_t)d.loadout[i]);
-    c->r[firstReg] = (uint32_t)(int32_t)d.loadout[firstReg == 6 ? 1 : 0];
+    for (uint32_t item = 1; item < 34; ++item) callGuest(c, 0x08926bd4, profile, item);
+    for (uint32_t item = 1; item < 34; ++item) psp::write8(profile + 3 * item + 1, 0);
+    for (int k = 0; k < 5; ++k) {
+        int id = d.loadout[k];
+        if (id >= 0 && id < 33) psp::write8(profile + 3 * (id + 1) + 1, (uint8_t)(k + 1));
+    }
+    for (uint32_t item = 24; item < 34; ++item) g_devGrenades[item] = psp::read8(profile + 268 + item);
+    g_devProfile = profile;
+    if (std::getenv("CA_DEV_TRACE")) {
+        std::fprintf(stderr, "[DEV] profile %08x stocked:", profile);
+        for (uint32_t item = 1; item < 34; ++item)
+            std::fprintf(stderr, " %d:%d/%d", (int8_t)psp::read8(profile + 3 * item), (int8_t)psp::read8(profile + 3 * item + 1),
+                         (int8_t)psp::read8(profile + 268 + item));
+        std::fprintf(stderr, "\n");
+    }
+}
+
+// Puts the next (dir 1) or previous (-1) weapon the player has not equipped in the place of the
+// current one, and asks the game to switch to it, as when a weapon is picked up (0x088a486c).
+void devCycle(Ctx* c, uint32_t player, uint32_t p, int dir) {
+    const int cur = (int16_t)psp::read16(p + 156);
+    if (cur < 1 || cur > 23 || (int16_t)psp::read16(p + 500) >= 0 || psp::read8(p + 502) != 0) return;
+    const uint32_t objs = psp::read32(p + 372);
+    if (!inRam(objs)) return;
+    int n = cur;
+    do n = (n - 1 + dir + 23) % 23 + 1;
+    while (n != cur && (psp::read8(p + 3 * n) != n || psp::read8(p + 3 * n + 1) != 0));
+    if (n == cur) return;
+    const uint8_t slot = psp::read8(p + 3 * cur + 1);
+    psp::write8(p + 3 * cur + 1, 0);
+    psp::write16(p + 496, (uint16_t)((int16_t)psp::read16(p + 496) - 1));
+    if (psp::read32(objs + 4 * n)) { // equipped before: its object is still there
+        psp::write16(p + 496, (uint16_t)((int16_t)psp::read16(p + 496) + 1));
+    } else if ((int32_t)callGuest(c, 0x08926a04, p, (uint32_t)n, 0, psp::read8(p + 504)) < 0) {
+        psp::write8(p + 3 * cur + 1, slot); // could not equip it: undo
+        psp::write16(p + 496, (uint16_t)((int16_t)psp::read16(p + 496) + 1));
+        return;
+    }
+    psp::write8(p + 3 * n + 1, slot);
+    psp::write16(p + 500, (uint16_t)n); // as 0x08926118
+    psp::write8(player + 1418, 0);
+    if (uint32_t hud = callGuest(c, 0x089048a8, 0)) callGuest(c, 0x08900df0, hud); // the HUD's weapon list
+    if (std::getenv("CA_DEV_TRACE")) std::fprintf(stderr, "[DEV] weapon %d -> %d (slot %d)\n", cur - 1, n - 1, slot);
+}
+
+// Once per frame on the player's thread: weapon changes and ammo.
+void devTick(Ctx* c) {
+    auto& d = psp::host::g_dev;
+    const uint32_t p = g_devProfile;
+    if (!d.enabled || !p) return;
+    // The player object (the view update's s3) holds its profile at +1244.
+    const uint32_t player = c->r[19];
+    if (int dir = d.cycle.exchange(0); dir && psp::read32(player + 1244) == p) devCycle(c, player, p, dir > 0 ? 1 : -1);
+    if (!d.infiniteAmmo) return;
+    const uint32_t reserve = callGuest(c, 0x08928c94, 0);
+    if (inRam(reserve) && inRam(reserve + 4 * 23))
+        for (uint32_t i = 0; i < 23; ++i)
+            if (psp::read32(reserve + 4 * i) < 300) psp::write32(reserve + 4 * i, 300);
+    for (uint32_t item = 24; item < 34; ++item)
+        if (psp::read8(p + 3 * item) == item && psp::read8(p + 268 + item) < g_devGrenades[item])
+            psp::write8(p + 268 + item, g_devGrenades[item]);
 }
 } // namespace
 
-extern "C" void ca_hook_dev_loadout_mission(Ctx* c) { devLoadout(c, c->r[29] + 36, 6); } // after 0x0890247c
-extern "C" void ca_hook_dev_loadout_respawn(Ctx* c) { devLoadout(c, c->r[29] + 20, 5); } // after 0x08900e18
+extern "C" void ca_hook_dev_player_weapons(Ctx* c) { // after 0x08927620
+    if (psp::host::g_dev.enabled) devStock(c, c->r[4]);
+}

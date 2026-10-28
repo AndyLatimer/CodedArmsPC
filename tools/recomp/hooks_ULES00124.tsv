@@ -5,5 +5,4 @@
 08879ff8  ca_hook_frame_interval # SetFrameInterval(settings, a1 = vblanks per frame), after its first instruction
 08837f7c  ca_hook_frame_work_done # main loop frame wait: entry (s0 = timing object)
 08837fac  ca_hook_frame_start   # main loop frame wait: exit (the vblank counter is reset)
-0890247c  ca_hook_dev_loadout_mission # mission start: s16 loadout[5] at sp+36, a2 = loadout[1] (dev mode)
-08900e18  ca_hook_dev_loadout_respawn # loadout again: s16 loadout[5] at sp+20, a1 = loadout[0] (dev mode)
+08927620  ca_hook_dev_player_weapons # player weapons set up (a0 = profile): stock the inventory (dev mode)
