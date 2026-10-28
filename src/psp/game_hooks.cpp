@@ -233,20 +233,20 @@ namespace {
 struct TextPatch {
     uint64_t pos;       // the string in the disc image
     uint32_t size;      // its length with the NUL (from the table's length prefix)
-    const char* expect; // its first bytes, checked before patching
+    uint64_t hash;      // FNV-1a of its original bytes, checked before patching
     const char* text;   // in the game's encoding (accents as two bytes, e.g. 0x83 0x60 = o acute)
 };
 const TextPatch kTextPatches[] = {
-    {74969841, 17, "ACCEPT CHALL", "PC SETUP"},
-    {74970029, 73, "Turning this", "PC settings: video, mouse, gamepad and controls."},
-    {75024509, 9, "ANNEHMEN\000", "PC-SETUP"},
-    {75024720, 84, "Bei Aktivier", "PC-Einstellungen: Grafik, Maus, Controller und Tasten."},
-    {75081222, 17, "ACEPTAR DESA", "AJUSTES PC"},
-    {75081487, 72, "Si activas e", "Ajustes del PC: v\203Vdeo, rat\203`n, mando y controles."},
-    {75137173, 15, "ACCEPTER D\202\255", "R\202\255GLAGES PC"},
-    {75137392, 65, "Active cette", "R\203Nglages PC : vid\203No, souris, manette, touches."},
-    {75192366, 14, "ACCETTA SFID", "IMPOSTAZ. PC"},
-    {75192634, 82, "Attivando qu", "Impostazioni PC: video, mouse, controller e tasti."},
+    {74969841, 17, 0x0aea366d052ef76cull, "PC SETUP"},
+    {74970029, 73, 0x3e122ae438a7ec7aull, "PC settings: video, mouse, gamepad and controls."},
+    {75024509, 9, 0x54fbce7a2887d089ull, "PC-SETUP"},
+    {75024720, 84, 0xe7b66ab321dceeb2ull, "PC-Einstellungen: Grafik, Maus, Controller und Tasten."},
+    {75081222, 17, 0xdd6a08592a0d2716ull, "AJUSTES PC"},
+    {75081487, 72, 0xc1a62b7d7a6d94a9ull, "Ajustes del PC: v\203Vdeo, rat\203`n, mando y controles."},
+    {75137173, 15, 0xf401d404819bbb36ull, "R\202\255GLAGES PC"},
+    {75137392, 65, 0xcc5a33964d15512aull, "R\203Nglages PC : vid\203No, souris, manette, touches."},
+    {75192366, 14, 0xeea8d180b445f91dull, "IMPOSTAZ. PC"},
+    {75192634, 82, 0x4c7e6c4c72c30a0eull, "Impostazioni PC: video, mouse, controller e tasti."},
 };
 } // namespace
 
@@ -258,7 +258,7 @@ void installTextPatches(IsoReader& iso) {
         std::string bytes(p.text);
         if (bytes.size() >= p.size) continue;
         bytes.resize(p.size - 1, '\0');
-        applied += iso.addPatch(p.pos, p.expect, bytes);
+        applied += iso.addPatch(p.pos, p.size, p.hash, bytes);
     }
     std::fprintf(stderr, "[PATCH] %d of %zu menu texts\n", applied, sizeof kTextPatches / sizeof kTextPatches[0]);
 }

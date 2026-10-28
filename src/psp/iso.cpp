@@ -42,9 +42,12 @@ size_t IsoReader::read(uint32_t lba, uint64_t offset, void* dst, size_t len) {
     return got;
 }
 
-bool IsoReader::addPatch(uint64_t pos, const std::string& expect, const std::string& bytes) {
-    std::string cur(expect.size(), '\0');
-    if (read((uint32_t)(pos / kSector), pos % kSector, cur.data(), cur.size()) != cur.size() || cur != expect) return false;
+bool IsoReader::addPatch(uint64_t pos, size_t size, uint64_t hash, const std::string& bytes) {
+    std::string cur(size, '\0');
+    if (read((uint32_t)(pos / kSector), pos % kSector, cur.data(), size) != size) return false;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (unsigned char c : cur) h = (h ^ c) * 0x100000001b3ull;
+    if (h != hash) return false;
     std::lock_guard<std::mutex> lk(mutex_);
     patches_.push_back({pos, bytes});
     return true;
