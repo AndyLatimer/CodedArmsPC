@@ -9,9 +9,10 @@ namespace ca {
 namespace {
 
 // Layout in the 960x544 image (twice the PSP screen), after the game's OPTIONS screen: label
-// panels on the left, value panels on the right.
+// panels on the left, value panels on the right. The game's normal letters are 14 pixels apart
+// here (7 on the PSP screen).
 constexpr int kListY = 24, kRowH = 34, kRows = 12, kPanelH = 28;
-constexpr int kLabelX = 96, kLabelW = 360, kValueX = kLabelX + kLabelW + 10, kValueW = 420;
+constexpr int kLabelX = 64, kLabelW = 436, kValueX = kLabelX + kLabelW + 10, kValueW = 420;
 constexpr int kValueRight = kValueX + kValueW, kPanelX = kLabelX - 40, kPanelW = kValueRight - kPanelX + 20;
 
 // The game's colours (sampled from its OPTIONS screen).
@@ -96,6 +97,16 @@ void OptionsMenu::click(int x, int y) {
 
 void OptionsMenu::paint(std::vector<uint32_t>& rgba) const {
     using namespace draw;
+    using Size = GameFontSize;
+    // Text in the game's lettering when it is available.
+    const bool game = font_.ok();
+    auto write = [&](int x, int y, const std::string& s, Size size, Color c, int maxW = 1 << 20) {
+        if (game) gameText(rgba, font_, x, y, s, size, c, maxW);
+        else text(rgba, x, y + 4, s, size == Size::Bold ? 2 : 1, c, maxW);
+    };
+    auto width = [&](const std::string& s, Size size) {
+        return game ? gameTextWidth(s, size) : textWidth(s, size == Size::Bold ? 2 : 1);
+    };
     rgba.assign((size_t)kOverlayW * kOverlayH, 0);
     rect(rgba, 0, 0, kOverlayW, kOverlayH, kVeil);
 
@@ -104,7 +115,7 @@ void OptionsMenu::paint(std::vector<uint32_t>& rgba) const {
         const MenuItem& it = items_[(size_t)i];
         const int y = kListY + r * kRowH;
         if (it.header) { // like the game's small captions above its fields
-            text(rgba, kLabelX, y + 14, upper(it.label), 1, kGreen);
+            write(kLabelX, y + 12, upper(it.label), Size::Small, kGreen);
             rect(rgba, kLabelX, y + 31, kValueRight - kLabelX, 1, kDimGreen);
             continue;
         }
@@ -119,38 +130,38 @@ void OptionsMenu::paint(std::vector<uint32_t>& rgba) const {
         } else {
             frame(rgba, kPanelX, y + 7, 24, kPanelH - 8, kDimGreen, 2);
         }
-        text(rgba, kLabelX + 12, y + 9, upper(it.label), 1, fg, kLabelW - 16);
-        std::string v = it.value ? it.value() : "";
-        if (!it.note.empty()) v = v.empty() ? it.note : v + "  (" + it.note + ")";
+        write(kLabelX + 10, y + 1, upper(it.label), Size::Normal, fg, kLabelW - 14);
+        const std::string v = it.value ? it.value() : "";
         const bool arrows = it.change && it.value;
-        const int vx = kValueX + (arrows ? 40 : 14);
-        text(rgba, vx, y + 9, v, 1, fg, kValueW - (arrows ? 80 : 28));
+        write(kValueX + (arrows ? 40 : 12), y + 1, v, Size::Normal, fg, kValueW - (arrows ? 80 : 24));
         if (arrows) { // the game's arrow boxes
             for (int k = 0; k < 2; ++k) {
                 const int bx = k ? kValueRight - 30 : kValueX + 6;
-                frame(rgba, bx, y + 7, 22, 20, sel ? kOrange : kDimGreen, 1);
-                text(rgba, bx + 7, y + 9, k ? ">" : "<", 1, sel ? kOrange : kDimGreen);
+                frame(rgba, bx, y + 6, 24, 22, sel ? kOrange : kDimGreen, 1);
+                write(bx + 5, y + 1, k ? ">" : "<", Size::Normal, sel ? kOrange : kDimGreen);
             }
         }
     }
-    if (first_ > 0) text(rgba, (kLabelX + kValueRight) / 2, kListY - 16, "^", 1, kGreen);
-    if (first_ + kRows < (int)items_.size()) text(rgba, (kLabelX + kValueRight) / 2, kListY + kRows * kRowH, "v", 1, kGreen);
+    // More rows above / below: arrows in the right margin, by the first / last row.
+    if (first_ > 0) write(kValueRight + 6, kListY + 8, "^", Size::Small, kGreen);
+    if (first_ + kRows < (int)items_.size()) write(kValueRight + 6, kListY + (kRows - 1) * kRowH + 12, "v", Size::Small, kGreen);
 
     // Help line, keys and the page's name, where the game has them.
     const MenuItem* cur = selectable(selected_) ? &items_[(size_t)selected_] : nullptr;
-    const std::string help = cur && !cur->help.empty() ? cur->help : (cur ? cur->label : "");
-    rect(rgba, 52, 452, 6, 6, kGreen);
-    rect(rgba, 60, 452, 4, 4, kGreen);
-    text(rgba, 72, 446, help, 1, kGreen, kOverlayW - 120);
-    if (!footer_.empty()) text(rgba, 16, 518, footer_, 1, kGreen, 620);
-    if (!title_.empty()) text(rgba, kOverlayW - 24 - textWidth(title_, 2), 500, title_, 2, kGreen);
+    std::string help = cur && !cur->help.empty() ? cur->help : (cur ? cur->label : "");
+    if (cur && !cur->note.empty()) help += " (" + cur->note + ")";
+    rect(rgba, 40, 450, 6, 6, kGreen);
+    rect(rgba, 48, 450, 4, 4, kGreen);
+    write(60, 438, help, Size::Normal, kGreen, kOverlayW - 80);
+    if (!footer_.empty()) write(16, 516, footer_, Size::Small, kGreen, 620);
+    if (!title_.empty()) write(kOverlayW - 20 - width(title_, Size::Bold), 494, title_, Size::Bold, kGreen);
 
     if (!prompt_.empty()) {
-        const int w = std::max(textWidth(prompt_, 1) + 80, 420), h = 90;
+        const int w = std::max(width(prompt_, Size::Normal) + 80, 420), h = 90;
         const int x = (kOverlayW - w) / 2, y = (kOverlayH - h) / 2;
         rect(rgba, x, y, w, h, Color{3, 28, 34, 250});
         frame(rgba, x, y, w, h, kOrange, 2);
-        text(rgba, (kOverlayW - textWidth(prompt_, 1)) / 2, y + (h - 16) / 2, prompt_, 1, kGreen);
+        write((kOverlayW - width(prompt_, Size::Normal)) / 2, y + (h - 32) / 2, prompt_, Size::Normal, kGreen);
     }
 }
 

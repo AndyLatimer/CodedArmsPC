@@ -214,7 +214,10 @@ struct InputState {
     // Keys pressed since the last frame, so a press released within one frame is not lost.
     bool keyClicked[SDL_NUM_SCANCODES] = {};
     bool wheelUp = false, wheelDown = false;
-    bool waitRelease = false; // after a menu closes: no input to the game until all are released
+    // After a menu closes: no input to the game until everything is released, for at most half a
+    // second (a key release can go missing when the mouse grab changes).
+    bool waitRelease = false;
+    Uint64 waitReleaseUntil = 0;
     bool confirmWasHeld = false;
     bool openPcSettings = false; // the PC SETUP row of the game's OPTIONS was confirmed
 };
@@ -251,7 +254,11 @@ void updateController(const FrontSettings& s, InputState& in, bool focused, floa
         for (const auto& b : s.bindings[i])
             if (bindingHeld(b, in, keys, mouse)) held[i] = true;
     if (in.waitRelease) {
-        if (std::any_of(std::begin(held), std::end(held), [](bool h) { return h; })) {
+        if (std::any_of(std::begin(held), std::end(held), [](bool h) { return h; }) && SDL_GetTicks64() < in.waitReleaseUntil) {
+            static const bool dbg = std::getenv("CA_INPUT_DEBUG") != nullptr;
+            if (dbg)
+                for (int i = 0; i < IN_COUNT; ++i)
+                    if (held[i]) std::fprintf(stderr, "[INPUT] waiting for the release of %s\n", kInputNames[i]);
             psp::host::g_ctrl.buttons = 0;
             psp::host::g_ctrl.lx = psp::host::g_ctrl.ly = 128;
             psp::host::g_ads = false;
@@ -472,12 +479,19 @@ GLuint makeProgram(const char* vs, const char* fs) {
 
 // ---- options menu (F1) ------------------------------------------------------------------------
 
-const char* const kInputLabels[IN_COUNT] = {
-    "Arriba - zoom del juego", "Abajo - recargar", "Izquierda - arma anterior", "Derecha - arma siguiente",
-    "Cruz - mirar abajo / aceptar", "Círculo - girar a la derecha / atrás", "Cuadrado - girar a la izquierda",
-    "Triángulo - mirar arriba", "L - saltar", "R - disparar", "Start - mapa", "Select - pausa",
-    "Stick - avanzar", "Stick - retroceder", "Stick - paso a la izquierda", "Stick - paso a la derecha",
-    "Apuntar con la mira"};
+// Texts of the PC settings page in the game's language: Spanish when it is set, English
+// otherwise (TECHNICAL_NOTES.md section 22).
+bool g_menuEs = false;
+std::string T(const char* es, const char* en) { return g_menuEs ? es : en; }
+
+const char* const kInputLabels[2][IN_COUNT] = {
+    {"Arriba: zoom", "Abajo: recargar", "Izquierda: arma anterior", "Derecha: arma siguiente", "Cruz: mirar abajo / aceptar",
+     "Círculo: girar dcha. / atrás", "Cuadrado: girar a la izquierda", "Triángulo: mirar arriba", "L: saltar", "R: disparar",
+     "Start: mapa", "Select: pausa", "Stick: avanzar", "Stick: retroceder", "Stick: paso a la izquierda",
+     "Stick: paso a la derecha", "Apuntar con la mira"},
+    {"Up: zoom", "Down: reload", "Left: previous weapon", "Right: next weapon", "Cross: look down / OK", "Circle: turn right / back",
+     "Square: turn left", "Triangle: look up", "L: jump", "R: fire", "Start: map", "Select: pause", "Stick: forward",
+     "Stick: back", "Stick: strafe left", "Stick: strafe right", "Aim down sights"}};
 
 // 0 keyboard, 1 mouse, 2 pad: a new binding replaces those of its own kind only.
 int bindingDevice(const ca::Binding& b) {
@@ -486,20 +500,21 @@ int bindingDevice(const ca::Binding& b) {
 }
 
 std::string bindingLabel(const ca::Binding& b) {
-    using T = ca::Binding::Type;
+    using BT = ca::Binding::Type;
     switch (b.type) {
-    case T::Key: return SDL_GetScancodeName(SDL_Scancode(b.code));
-    case T::MouseButton: {
-        static const char* n[] = {"Ratón", "Ratón izq.", "Ratón central", "Ratón der.", "Ratón 4", "Ratón 5"};
-        return b.code >= 1 && b.code <= 5 ? n[b.code] : n[0];
+    case BT::Key: return SDL_GetScancodeName(SDL_Scancode(b.code));
+    case BT::MouseButton: {
+        static const char* n[2][6] = {{"Ratón", "Clic izq.", "Clic central", "Clic der.", "Ratón 4", "Ratón 5"},
+                                      {"Mouse", "Mouse L", "Mouse M", "Mouse R", "Mouse 4", "Mouse 5"}};
+        return n[g_menuEs ? 0 : 1][b.code >= 1 && b.code <= 5 ? b.code : 0];
     }
-    case T::MouseWheelUp: return "Rueda arriba";
-    case T::MouseWheelDown: return "Rueda abajo";
-    case T::PadButton: {
+    case BT::MouseWheelUp: return T("Rueda arriba", "Wheel up");
+    case BT::MouseWheelDown: return T("Rueda abajo", "Wheel down");
+    case BT::PadButton: {
         const char* n = SDL_GameControllerGetStringForButton(SDL_GameControllerButton(b.code));
-        return std::string("Mando ") + (n ? n : "?");
+        return std::string("Pad ") + (n ? n : "?");
     }
-    case T::PadTrigger: return b.code == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? "Mando LT" : "Mando RT";
+    case BT::PadTrigger: return b.code == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? "Pad LT" : "Pad RT";
     }
     return "?";
 }
@@ -536,40 +551,41 @@ struct MenuState {
     bool quit = false;
 };
 
-std::string onOff(bool v) { return v ? "Sí" : "No"; }
-
-ca::MenuItem header(const char* label) {
+ca::MenuItem header(const std::string& label) {
     ca::MenuItem m;
     m.label = label;
     m.header = true;
     return m;
 }
 
-ca::MenuItem toggle(const char* label, bool& v, std::function<void()> apply = {}, const char* note = "") {
+ca::MenuItem toggle(const std::string& label, bool& v, std::string help, std::function<void()> apply = {}, std::string note = "") {
     ca::MenuItem m;
     m.label = label;
-    m.value = [&v] { return onOff(v); };
+    m.value = [&v] { return v ? T("Sí", "On") : T("No", "Off"); };
     m.change = [&v, apply](int) { v = !v; if (apply) apply(); };
-    m.note = note;
+    m.help = std::move(help);
+    m.note = std::move(note);
     return m;
 }
 
-ca::MenuItem choice(const char* label, std::vector<std::string> names, std::function<int()> get, std::function<void(int)> set,
-                    const char* note = "") {
+ca::MenuItem choice(const std::string& label, std::vector<std::string> names, std::function<int()> get, std::function<void(int)> set,
+                    std::string help, std::string note = "") {
     ca::MenuItem m;
     m.label = label;
     m.value = [names, get] { int k = get(); return k >= 0 && k < (int)names.size() ? names[(size_t)k] : "?"; };
     m.change = [n = (int)names.size(), get, set](int d) { set(((std::max(0, get()) + d) % n + n) % n); };
-    m.note = note;
+    m.help = std::move(help);
+    m.note = std::move(note);
     return m;
 }
 
-ca::MenuItem slider(const char* label, float& v, float lo, float hi, float step, bool percent, std::function<void()> apply = {}) {
+ca::MenuItem slider(const std::string& label, float& v, float lo, float hi, float step, bool percent, std::string help,
+                    std::function<void()> apply = {}) {
     ca::MenuItem m;
     m.label = label;
     m.value = [&v, percent] {
         char b[32];
-        if (percent) std::snprintf(b, sizeof b, "%d %%", (int)std::lround(v * 100));
+        if (percent) std::snprintf(b, sizeof b, "%d%%", (int)std::lround(v * 100));
         else std::snprintf(b, sizeof b, "%.1f", v);
         return std::string(b);
     };
@@ -577,20 +593,24 @@ ca::MenuItem slider(const char* label, float& v, float lo, float hi, float step,
         v = std::clamp(std::round((v + d * step) / step) * step, lo, hi);
         if (apply) apply();
     };
+    m.help = std::move(help);
     return m;
 }
 
 std::vector<ca::MenuItem> buildMenu(FrontSettings& s, SDL_Window* win, MenuState& st) {
     std::vector<ca::MenuItem> m;
-    m.push_back(header("Vídeo"));
-    m.push_back(choice("Pantalla", {"Ventana", "Pantalla completa"},
+    const std::string restart = T("se aplica al reiniciar", "applies after a restart");
+    m.push_back(header(T("Vídeo", "Video")));
+    m.push_back(choice(T("Pantalla", "Display"), {T("Ventana", "Window"), T("Pantalla completa", "Fullscreen")},
                        [win] { return (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) ? 1 : 0; },
                        [&s, win](int v) {
                            s.fullscreen = v;
                            SDL_SetWindowFullscreen(win, v ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
-                       }));
+                       },
+                       T("Ventana o pantalla completa (también con F11).", "Window or fullscreen (also F11).")));
     static const int kSizes[][2] = {{960, 544}, {1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
-    m.push_back(choice("Tamaño de la ventana", {"960 x 544", "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"},
+    m.push_back(choice(T("Tamaño de la ventana", "Window size"),
+                       {"960 x 544", "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"},
                        [&s] {
                            for (int k = 0; k < 6; ++k) if (s.width == kSizes[k][0] && s.height == kSizes[k][1]) return k;
                            return -1;
@@ -602,56 +622,79 @@ std::vector<ca::MenuItem> buildMenu(FrontSettings& s, SDL_Window* win, MenuState
                                SDL_SetWindowSize(win, s.width, s.height);
                                SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
                            }
-                       }));
-    m.push_back(toggle("Sincronización vertical", s.vsync, [&s] { SDL_GL_SetSwapInterval(s.vsync ? 1 : 0); }));
-    m.push_back(choice("Fotogramas por segundo", {"60", "30", "Original (20 en misiones)"},
+                       },
+                       T("Tamaño de la ventana fuera de la pantalla completa.", "Size of the window when not fullscreen.")));
+    m.push_back(toggle(T("Sincronización vertical", "Vertical sync"), s.vsync,
+                       T("Sincroniza con el monitor para evitar cortes en la imagen.", "Syncs with the monitor to avoid tearing."),
+                       [&s] { SDL_GL_SetSwapInterval(s.vsync ? 1 : 0); }));
+    m.push_back(choice(T("Fotogramas por segundo", "Frame rate"), {"60", "30", "Original"},
                        [&s] { return s.frameRate >= 60 ? 0 : (s.frameRate >= 30 ? 1 : 2); },
                        [&s](int k) {
                            s.frameRate = k == 0 ? 60 : (k == 1 ? 30 : 0);
                            psp::host::g_targetFps = s.frameRate;
                        },
-                       "al cambiar de pantalla"));
-    m.push_back(choice("Resolución interna", {"Automática", "1x", "2x", "3x", "4x", "5x", "6x"},
-                       [&s] { return std::clamp(s.renderScale, 0, 6); }, [&s](int k) { s.renderScale = k; }, "al reiniciar"));
-    m.push_back(choice("Panorámico", {"No (480x272)", "Sí"}, [&s] { return s.widescreen ? 1 : 0; },
-                       [&s](int k) { s.widescreen = k; }, "al reiniciar"));
-    m.push_back(toggle("Estirar la imagen a la ventana", s.stretch));
-    m.push_back(toggle("Suavizar la imagen", s.linearOutput));
-    m.push_back(toggle("Teclas del PC en las ayudas", s.pcButtonHints, {}, "al reiniciar"));
+                       T("60 o 30; Original: 20 en las misiones, como en la PSP.", "60 or 30; Original: 20 in missions, as on the PSP."),
+                       T("al cambiar de pantalla", "on the next screen")));
+    m.push_back(choice(T("Resolución interna", "Internal resolution"), {T("Automática", "Auto"), "1x", "2x", "3x", "4x", "5x", "6x"},
+                       [&s] { return std::clamp(s.renderScale, 0, 6); }, [&s](int k) { s.renderScale = k; },
+                       T("Resolución del dibujo (Automática: según la ventana).", "Rendering resolution (Auto: from the window)."), restart));
+    m.push_back(choice(T("Panorámico", "Widescreen"), {T("No", "Off"), T("Sí", "On")}, [&s] { return s.widescreen ? 1 : 0; },
+                       [&s](int k) { s.widescreen = k; },
+                       T("Amplía la vista al formato de la ventana (16:9, 21:9...).", "Widens the view to the window's shape (16:9, 21:9...)."),
+                       restart));
+    m.push_back(toggle(T("Estirar a la ventana", "Stretch to window"), s.stretch,
+                       T("Llena la ventana sin mantener la proporción.", "Fills the window without keeping the shape.")));
+    m.push_back(toggle(T("Suavizar la imagen", "Smooth picture"), s.linearOutput,
+                       T("Filtro bilineal al escalar la imagen a la ventana.", "Bilinear filter when scaling to the window.")));
+    m.push_back(toggle(T("Teclas del PC en las ayudas", "PC keys in button hints"), s.pcButtonHints,
+                       T("Teclas del PC en lugar de los botones de la PSP.", "PC keys instead of the PSP buttons."), {}, restart));
 
     m.push_back(header("Audio"));
-    m.push_back(slider("Volumen", s.volume, 0, 1, 0.05f, true, [&s] { g_volume = s.volume; }));
+    m.push_back(slider(T("Volumen", "Volume"), s.volume, 0, 1, 0.05f, true, T("Volumen general del juego.", "Overall volume."),
+                       [&s] { g_volume = s.volume; }));
 
-    m.push_back(header("Ratón"));
-    m.push_back(slider("Sensibilidad horizontal", s.mouseSensX, 0.1f, 5, 0.1f, false));
-    m.push_back(slider("Sensibilidad vertical", s.mouseSensY, 0.1f, 5, 0.1f, false));
-    m.push_back(toggle("Invertir eje vertical", s.invertY));
-    m.push_back(toggle("Invertir eje horizontal", s.invertX));
-    m.push_back(slider("Sensibilidad al apuntar con la mira", s.adsSens, 0.1f, 2, 0.1f, false));
-    m.push_back(choice("Apuntar con la mira", {"Mantener", "Pulsar para alternar"}, [&s] { return s.adsToggle ? 1 : 0; },
-                       [&s](int k) { s.adsToggle = k != 0; }));
+    const std::string sensH = T("Velocidad de giro.", "Turning speed."), sensV = T("Velocidad al mirar arriba y abajo.", "Looking up and down speed.");
+    m.push_back(header(T("Ratón", "Mouse")));
+    m.push_back(slider(T("Sensibilidad horizontal", "Horizontal sensitivity"), s.mouseSensX, 0.1f, 5, 0.1f, false, sensH));
+    m.push_back(slider(T("Sensibilidad vertical", "Vertical sensitivity"), s.mouseSensY, 0.1f, 5, 0.1f, false, sensV));
+    m.push_back(toggle(T("Invertir eje vertical", "Invert vertical axis"), s.invertY,
+                       T("Invierte arriba y abajo al mirar.", "Swaps up and down when looking.")));
+    m.push_back(toggle(T("Invertir eje horizontal", "Invert horizontal axis"), s.invertX,
+                       T("Invierte izquierda y derecha al girar.", "Swaps left and right when turning.")));
+    m.push_back(slider(T("Sensibilidad con la mira", "Sensitivity on the sights"), s.adsSens, 0.1f, 2, 0.1f, false,
+                       T("Velocidad de ratón y mando al apuntar con la mira.", "Mouse and pad speed when aiming down sights.")));
+    m.push_back(choice(T("Apuntar con la mira", "Aim down sights"), {T("Mantener", "Hold"), T("Alternar", "Toggle")},
+                       [&s] { return s.adsToggle ? 1 : 0; }, [&s](int k) { s.adsToggle = k != 0; },
+                       T("Mantener pulsado para apuntar, o pulsar para alternar.", "Hold to aim, or press to toggle.")));
 
-    m.push_back(header("Mando"));
-    m.push_back(slider("Sensibilidad horizontal", s.padSensX, 0.1f, 3, 0.1f, false));
-    m.push_back(slider("Sensibilidad vertical", s.padSensY, 0.1f, 3, 0.1f, false));
-    m.push_back(toggle("Invertir eje vertical", s.padInvertY));
-    m.push_back(slider("Zona muerta del stick izquierdo", s.deadzone, 0, 0.5f, 0.05f, true));
-    m.push_back(slider("Zona muerta del stick derecho", s.deadzoneRight, 0, 0.5f, 0.05f, true));
+    const std::string dead = T("Movimiento del stick que se ignora.", "Stick movement that is ignored.");
+    m.push_back(header(T("Mando", "Gamepad")));
+    m.push_back(slider(T("Sensibilidad horizontal", "Horizontal sensitivity"), s.padSensX, 0.1f, 3, 0.1f, false, sensH));
+    m.push_back(slider(T("Sensibilidad vertical", "Vertical sensitivity"), s.padSensY, 0.1f, 3, 0.1f, false, sensV));
+    m.push_back(toggle(T("Invertir eje vertical", "Invert vertical axis"), s.padInvertY,
+                       T("Invierte arriba y abajo al mirar.", "Swaps up and down when looking.")));
+    m.push_back(slider(T("Zona muerta stick izquierdo", "Left stick dead zone"), s.deadzone, 0, 0.5f, 0.05f, true, dead));
+    m.push_back(slider(T("Zona muerta stick derecho", "Right stick dead zone"), s.deadzoneRight, 0, 0.5f, 0.05f, true, dead));
 
-    m.push_back(header("Controles (Intro y pulsa la tecla nueva)"));
+    m.push_back(header(T("Controles", "Controls")));
+    const std::string bindHelp = g_menuEs ? "Pulsa " + keyName(s.bindings[IN_CROSS]) + " y después la tecla o el botón nuevo."
+                                          : "Press " + keyName(s.bindings[IN_CROSS]) + ", then the new key or button.";
     for (int i = 0; i < IN_COUNT; ++i) {
         ca::MenuItem it;
-        it.label = kInputLabels[i];
+        it.label = kInputLabels[g_menuEs ? 0 : 1][i];
         it.value = [&s, i] { return bindingsLabel(s.bindings[i]); };
         it.activate = [&st, i] {
             st.capture = i;
-            st.menu.setPrompt(std::string("Pulsa la tecla, botón del ratón o del mando (F1 cancela)"));
+            st.menu.setPrompt(T("Pulsa la tecla, botón del ratón o del mando (F1 cancela)",
+                                "Press a key, mouse button or pad button (F1 cancels)"));
         };
+        it.help = bindHelp;
         m.push_back(it);
     }
     {
         ca::MenuItem it;
-        it.label = "Restaurar los controles por defecto";
+        it.label = T("Restaurar controles", "Reset controls");
+        it.help = T("Vuelve a la configuración de teclas inicial.", "Back to the default controls.");
         it.activate = [&s] {
             for (int i = 0; i < IN_COUNT; ++i) {
                 s.bindingText[i] = kDefaultBindings[i];
@@ -662,42 +705,17 @@ std::vector<ca::MenuItem> buildMenu(FrontSettings& s, SDL_Window* win, MenuState
         m.push_back(it);
     }
 
-    m.push_back(header("Otros"));
-    m.push_back(toggle("Modo dev (todas las armas, F5/F6)", s.dev, [&s] { psp::host::g_dev.enabled = s.dev; },
-                       "desde el siguiente nivel"));
+    m.push_back(header(T("Otros", "Other")));
+    m.push_back(toggle(T("Modo dev", "Dev mode"), s.dev,
+                       T("Pruebas: todas las armas y munición infinita; F5/F6 cambian el arma.",
+                         "Testing: every weapon, endless ammo; F5/F6 change the weapon."),
+                       [&s] { psp::host::g_dev.enabled = s.dev; }, T("desde el siguiente nivel", "from the next level")));
     {
         ca::MenuItem it;
-        it.label = "Volver";
-        it.help = "Vuelve a Options. Los cambios se guardan en config.ini.";
+        it.label = T("Volver", "Back");
+        it.help = T("Vuelve a Opciones. Los cambios se guardan en config.ini.", "Back to Options. Changes are saved to config.ini.");
         it.activate = [&st] { st.menu.close(); };
         m.push_back(it);
-    }
-    static const std::pair<const char*, const char*> kHelp[] = {
-        {"Pantalla", "Ventana o pantalla completa (también con F11)."},
-        {"Tamaño de la ventana", "Tamaño de la ventana cuando no está a pantalla completa."},
-        {"Sincronización vertical", "Sincroniza con el monitor para evitar cortes en la imagen."},
-        {"Fotogramas por segundo", "60 o 30; Original = 20 en las misiones, como en la PSP."},
-        {"Resolución interna", "Resolución a la que se dibuja el juego (Automática: según la ventana)."},
-        {"Panorámico", "Amplía la vista al formato de la ventana (16:9, 21:9...)."},
-        {"Estirar la imagen a la ventana", "Llena la ventana sin mantener la proporción."},
-        {"Suavizar la imagen", "Filtro bilineal al escalar la imagen a la ventana."},
-        {"Teclas del PC en las ayudas", "Muestra las teclas del PC en lugar de los botones de la PSP."},
-        {"Volumen", "Volumen general del juego."},
-        {"Sensibilidad horizontal", "Velocidad de giro."},
-        {"Sensibilidad vertical", "Velocidad al mirar arriba y abajo."},
-        {"Invertir eje vertical", "Invierte arriba y abajo al mirar."},
-        {"Invertir eje horizontal", "Invierte izquierda y derecha al girar."},
-        {"Sensibilidad al apuntar con la mira", "Velocidad del ratón y del mando mientras se apunta con la mira."},
-        {"Apuntar con la mira", "Mantener pulsado para apuntar, o pulsar una vez para alternar."},
-        {"Zona muerta del stick izquierdo", "Movimiento del stick que se ignora (desgaste del mando)."},
-        {"Zona muerta del stick derecho", "Movimiento del stick que se ignora (desgaste del mando)."},
-        {"Restaurar los controles por defecto", "Vuelve a la configuración de teclas inicial."},
-        {"Modo dev (todas las armas, F5/F6)", "Pruebas: todas las armas y munición infinita; F5/F6 cambian el arma."},
-    };
-    for (ca::MenuItem& it : m) {
-        if (it.header || !it.help.empty()) continue;
-        for (const auto& h : kHelp) if (it.label == h.first) it.help = h.second;
-        if (it.help.empty() && it.activate && it.value) it.help = "Pulsa " + keyName(s.bindings[IN_CROSS]) + " y después la tecla o el botón nuevo.";
     }
     return m;
 }
@@ -853,9 +871,14 @@ int main(int argc, char** argv) {
     MenuState menu;
     bool menuActive = false;
     auto openMenu = [&] {
+        g_menuEs = psp::host::gameLanguage() == 3; // the PSP's code for Spanish
+        ca::draw::GameFont font;
+        if (psp::gpu::gameFontAtlas(0, font.base)) psp::gpu::gameFontAtlas(1, font.accents);
+        menu.menu.setFont(std::move(font));
         menu.menu.open(buildMenu(s, win, menu));
-        menu.menu.setFooter("<> Cambiar   " + keyName(s.bindings[IN_CROSS]) + " OK   " + keyName(s.bindings[IN_CIRCLE]) + "/Esc Volver");
-        menu.menu.setTitle("PC Setup");
+        menu.menu.setFooter("<> " + T("Cambiar", "Change") + "   " + keyName(s.bindings[IN_CROSS]) + " OK   " +
+                            keyName(s.bindings[IN_CIRCLE]) + "/Esc " + T("Volver", "Back"));
+        menu.menu.setTitle(T("AJUSTES PC", "PC SETUP"));
         menuActive = true;
         psp::kernel::setPaused(true);
         SDL_SetRelativeMouseMode(SDL_FALSE);
@@ -1013,6 +1036,7 @@ int main(int argc, char** argv) {
             in.mouseHeld = in.mouseClicked = 0;
             in.lookAccumX = in.lookAccumY = 0;
             in.waitRelease = true;
+            in.waitReleaseUntil = SDL_GetTicks64() + 500;
             psp::kernel::setPaused(false);
         }
         Uint64 nowTicks = SDL_GetPerformanceCounter();

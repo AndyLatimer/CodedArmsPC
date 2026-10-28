@@ -264,6 +264,14 @@ void installTextPatches(IsoReader& iso) {
 }
 } // namespace psp::kernel
 
+// The game's language settings live in one object at 0x09e6134c (its getter 0x08a1e3f4
+// fills it from the system settings on first use, flag at 0x09e6133c); the language code is at
+// +8, written by 0x08a1e350 when the language is changed in OPTIONS.
+int psp::host::gameLanguage() {
+    if (!psp::read8(0x09e6133c)) return -1;
+    return (int)psp::read32(0x09e61354);
+}
+
 extern "C" void ca_hook_options_menu(Ctx* c) { // after 0x08964e1c (a0 = the OPTIONS menu)
     auto& o = psp::host::g_gameOptions;
     const int row = (int16_t)psp::read16(c->r[4] + 158);

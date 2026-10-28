@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+#include "frontend/DialogOverlay.h"
+
 namespace ca {
 
 struct MenuItem {
@@ -17,7 +19,7 @@ struct MenuItem {
     std::function<std::string()> value;       // shown on the right (optional)
     std::function<void(int dir)> change;      // left (-1) / right (+1)
     std::function<void()> activate;           // Enter / click (default: change(+1))
-    std::string note;                         // after the value (e.g. "al reiniciar")
+    std::string note;                         // added to the help line (e.g. "al reiniciar")
     std::string help;                         // the help line while selected
 };
 
@@ -41,6 +43,8 @@ public:
     // Keys line at the bottom (e.g. "<> Cambiar  Enter OK  Esc Volver") and the page's name.
     void setFooter(std::string text) { footer_ = std::move(text); }
     void setTitle(std::string text) { title_ = std::move(text); }
+    // The game's lettering (draw::GameFont); without it the dialogs' font is used.
+    void setFont(draw::GameFont font) { font_ = std::move(font); }
 
     void paint(std::vector<uint32_t>& rgba) const;
 
@@ -53,6 +57,7 @@ private:
     bool open_ = false;
     int selected_ = 0, first_ = 0;
     std::string prompt_, footer_, title_;
+    draw::GameFont font_;
 };
 
 } // namespace ca

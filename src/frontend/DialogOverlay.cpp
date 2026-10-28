@@ -169,6 +169,84 @@ void text(std::vector<uint32_t>& rgba, int x, int y, const std::string& utf8, in
     ca::text(cv, x, y, utf8, scale, ca::Color{c.r, c.g, c.b, c.a}, maxW);
 }
 int textWidth(const std::string& utf8, int scale) { return ca::textWidth(utf8, scale); }
+
+namespace {
+// The atlases' layout (read from the game's textures and its text draws: 16x16 sprites one
+// after another 7 pixels apart; TECHNICAL_NOTES.md section 22). Base atlas: normal cells 16x16
+// from y 0 (16 per row), small cells 8x8 from y 128 (32 per row), both in the order of kSigns;
+// bold cells 16x16 from y 160 in the order of kBold. Accents atlas: normal cells from y 0 and
+// small cells from y 80, both in the order of kAccents (rows of 16, 8, 16, 8, 3).
+const char32_t kSigns[] = U"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789,."
+                          U":;?!\u00af_\u2012-/\\\u201c\u201d()[]"
+                          U"\uff08\uff09+\u2212\u00b1\u00d7\u00f7=<>\u2266\u2267\u221e\u00b0\u2032\u2033"
+                          U"\u2103\u00a5$\u00a2\u00a3%#&*@\u300a\u300b\u221a\u2160\u2161\u2162"
+                          U"\u2163\u2164\u2588\u00a9^`";
+const char32_t kBold[] = U"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._+%-";
+const char32_t* const kAccentRows[] = {U"\u00c1\u00c0\u00c2\u00c4\u00c6\u00c7\u0152\u00c9\u00c8\u00ca\u00cb\u00cd\u00cc\u00ce\u00cf\u00d1",
+                                       U"\u00d3\u00d2\u00d4\u00d6\u00da\u00d9\u00db\u00dc",
+                                       U"\u00e1\u00e0\u00e2\u00e4\u00e6\u00e7\u0153\u00e9\u00e8\u00ea\u00eb\u00ed\u00ec\u00ee\u00ef\u00f1",
+                                       U"\u00f3\u00f2\u00f4\u00f6\u00fa\u00f9\u00fb\u00fc", U"\u00df\u00a1\u00bf"};
+
+int find(const char32_t* list, char32_t cp) {
+    for (int i = 0; list[i]; ++i) if (list[i] == cp) return i;
+    return -1;
+}
+
+// Where `cp` is: atlas (0 base, 1 accents) and its cell's top left; false if missing.
+bool locate(char32_t cp, GameFontSize size, int& atlas, int& gx, int& gy, int& cell) {
+    if (cp == '\'') cp = 0x2032;
+    if (cp == '"') cp = 0x201c;
+    if (size == GameFontSize::Bold) {
+        if (cp >= 'a' && cp <= 'z' && find(kBold, cp) < 0) cp -= 32;
+        const int i = find(kBold, cp);
+        if (i < 0) return false;
+        atlas = 0, cell = 16, gx = (i % 16) * 16, gy = 160 + (i / 16) * 16;
+        return true;
+    }
+    const bool small = size == GameFontSize::Small;
+    cell = small ? 8 : 16;
+    if (int i = find(kSigns, cp); i >= 0) {
+        atlas = 0;
+        gx = small ? (i % 32) * 8 : (i % 16) * 16;
+        gy = small ? 128 + (i / 32) * 8 : (i / 16) * 16;
+        return true;
+    }
+    for (int r = 0; r < 5; ++r)
+        if (int i = find(kAccentRows[r], cp); i >= 0) {
+            atlas = 1, gx = i * cell, gy = (small ? 80 : 0) + r * cell;
+            return true;
+        }
+    return false;
+}
+
+int advance(GameFontSize size) { return size == GameFontSize::Bold ? 15 : 7; } // atlas pixels
+} // namespace
+
+int gameTextWidth(const std::string& utf8, GameFontSize size) { return (int)decode(utf8).size() * advance(size) * 2; }
+
+void gameText(std::vector<uint32_t>& rgba, const GameFont& font, int x, int y, const std::string& utf8, GameFontSize size, Color c,
+              int maxW) {
+    if (!font.ok()) return;
+    Canvas cv{rgba, 255};
+    const ca::Color col{c.r, c.g, c.b, c.a};
+    int cx = x;
+    for (uint32_t cp : decode(utf8)) {
+        const int adv = advance(size) * 2;
+        if (cx + adv > x + maxW) break;
+        int atlas, gx, gy, cell;
+        if (cp != ' ' && locate((char32_t)cp, size, atlas, gx, gy, cell)) {
+            const std::vector<uint32_t>& a = atlas ? font.accents : font.base;
+            if (a.size() == 256 * 256)
+                for (int py = 0; py < cell; ++py)
+                    for (int px = 0; px < cell; ++px) {
+                        const int alpha = (int)(a[(size_t)(gy + py) * 256 + gx + px] >> 24);
+                        if (!alpha) continue;
+                        for (int k = 0; k < 4; ++k) cv.blend(cx + px * 2 + (k & 1), y + py * 2 + (k >> 1), col, alpha);
+                    }
+        }
+        cx += adv;
+    }
+}
 } // namespace draw
 
 void paintDialog(const DialogView& v, const DialogKeys& keys, std::vector<uint32_t>& rgba) {

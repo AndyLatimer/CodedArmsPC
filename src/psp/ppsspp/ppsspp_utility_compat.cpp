@@ -1,5 +1,6 @@
 // Runtime side of ppsspp_utility_compat.h: logging, string helpers, the memory stick model and
 // the ms0:/ file system the ported PPSSPP savedata code works on.
+#include <cstdlib>
 #include "ppsspp_utility_compat.h"
 
 #include <cstdarg>
@@ -25,7 +26,11 @@ void ppsspp_utility_log(const char* level, const char* fmt, ...) {
     psp::kernel::log("[UTIL %s] %s", level, buf);
 }
 
-int GetPSPLanguage() { return g_Config.iLanguage; }
+// CA_LANGUAGE=<PSP language code> (debug): start with another system language (3 Spanish).
+int GetPSPLanguage() {
+    static const int lang = std::getenv("CA_LANGUAGE") ? std::atoi(std::getenv("CA_LANGUAGE")) : g_Config.iLanguage;
+    return lang;
+}
 
 // from PPSSPP Common/StringUtils.cpp
 size_t truncate_cpy(char* dest, size_t destSize, const char* src) {

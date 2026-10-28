@@ -701,6 +701,15 @@ void Recorder::buildState(GlState& st, const FboInfo& f, bool through, int prim)
     }
 }
 
+// The game's font atlases (gpu.h), by guest address (TECHNICAL_NOTES.md section 22).
+constexpr uint32_t kFontAtlas[2] = {0x08c66280, 0x08c6e440};
+std::mutex g_fontMutex;
+std::vector<uint32_t> g_fontAtlas[2];
+void keepFontAtlas(uint32_t addr, const std::vector<uint32_t>& px) {
+    std::lock_guard<std::mutex> lk(g_fontMutex);
+    g_fontAtlas[addr == kFontAtlas[0] ? 0 : 1] = px;
+}
+
 bool Recorder::setupTexture(GlState& st, Ubo& u, const FboInfo& target) {
     ScopedUs perf(g_perf.texUs);
     const uint32_t texbufw0 = reg(CMD_TEXBUFWIDTH0);
@@ -790,6 +799,7 @@ bool Recorder::setupTexture(GlState& st, Ubo& u, const FboInfo& target) {
             int lw = 1 << (reg(CMD_TEXSIZE0 + l) & 0xF), lh = 1 << ((reg(CMD_TEXSIZE0 + l) >> 8) & 0xF);
             decodeTexture(la, format, lw, lh, textureBufw(bw, format), swz, cs, px);
             if (l == 0) patchButtonGlyphs(px.data(), lw, lh);
+            if (l == 0 && lw == 256 && lh == 256 && (la == kFontAtlas[0] || la == kFontAtlas[1])) keepFontAtlas(la, px);
             size_t off = frame_->blob.size();
             frame_->blob.resize(off + px.size() * 4);
             std::memcpy(frame_->blob.data() + off, px.data(), px.size() * 4);
@@ -1650,5 +1660,12 @@ void renderShutdown() {}
 void dumpNextFrames(int n) { g_dumpFrames = n; }
 void setMaxDraws(int n) { g_maxDraws = n; }
 void setSkipFramebufferTextures(bool b) { g_skipFbTex = b; }
+
+bool gameFontAtlas(int which, std::vector<uint32_t>& rgba) {
+    std::lock_guard<std::mutex> lk(g_fontMutex);
+    if (which < 0 || which > 1 || g_fontAtlas[which].size() != 256 * 256) return false;
+    rgba = g_fontAtlas[which];
+    return true;
+}
 
 } // namespace psp::gpu

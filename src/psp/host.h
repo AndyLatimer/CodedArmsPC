@@ -72,6 +72,9 @@ struct GameOptions {
     std::atomic<uint64_t> seenUs{0};
 };
 extern GameOptions g_gameOptions;
+// The game's language as a PSP language code (1 English, 2 French, 3 Spanish, 4 German,
+// 5 Italian), -1 before the game has set it (game_hooks.cpp).
+int gameLanguage();
 
 // Frame rate the game is run at: 60 or 30; 0 keeps the game's own (20 fps in missions).
 // Applied when the game sets its frame interval (game_hooks.cpp).

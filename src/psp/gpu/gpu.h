@@ -45,4 +45,11 @@ void dumpNextFrames(int n); // debug: log every draw of the next n frames
 void setMaxDraws(int n);                    // debug: execute only the first n draws of each frame (-1 = all)
 void setSkipFramebufferTextures(bool skip); // debug: skip draws that sample framebuffers
 
+// The game's font atlases (256x256 RGBA8888, white glyphs with alpha), kept when the game loads
+// them so the front end can write in the game's own lettering (frontend/OptionsMenu.cpp).
+// 0: the base font (letters, digits, signs; normal 16x16, small 8x8 and bold cells), loaded
+// with the menus; 1: the accented letters, loaded when a language other than English is set.
+// False until the game has used that atlas.
+bool gameFontAtlas(int which, std::vector<uint32_t>& rgba);
+
 } // namespace psp::gpu

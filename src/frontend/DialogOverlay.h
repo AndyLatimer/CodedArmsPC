@@ -31,6 +31,18 @@ void rect(std::vector<uint32_t>& rgba, int x, int y, int w, int h, Color c);
 void frame(std::vector<uint32_t>& rgba, int x, int y, int w, int h, Color c, int thickness);
 void text(std::vector<uint32_t>& rgba, int x, int y, const std::string& utf8, int scale, Color c, int maxW = 1 << 20);
 int textWidth(const std::string& utf8, int scale);
+
+// The game's own lettering, from its font atlases (psp::gpu::gameFontAtlas), drawn at twice
+// the atlas size as the game's picture is in this image. Characters the atlases lack are left
+// out (the advance is kept).
+struct GameFont {
+    std::vector<uint32_t> base, accents; // 256x256 each; `accents` may be empty
+    bool ok() const { return base.size() == 256 * 256; }
+};
+enum class GameFontSize { Normal, Small, Bold };
+void gameText(std::vector<uint32_t>& rgba, const GameFont& font, int x, int y, const std::string& utf8, GameFontSize size, Color c,
+              int maxW = 1 << 20);
+int gameTextWidth(const std::string& utf8, GameFontSize size);
 } // namespace draw
 
 } // namespace ca
