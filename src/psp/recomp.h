@@ -52,10 +52,15 @@ static inline void wr16_(uint8_t* p, uint16_t v) { memcpy(p, &v, 2); }
 #define WR32(a, v) wr32_(HOST(a), (uint32_t)(v))
 
 void rt_watch_store(Ctx* c, uint32_t pc, uint32_t addr);
+// Profile build (CA_RECOMP_PROFILE): calls per function, indexed by (address - text base) / 4.
+extern uint32_t g_prof_counts[];
+#define RT_PROF(a) (++g_prof_counts[((a) - 0x08804000u) >> 2])
 void ca_hook_player_view(Ctx* c);
 void ca_hook_frame_interval(Ctx* c);
 void ca_hook_frame_work_done(Ctx* c);
 void ca_hook_frame_start(Ctx* c);
+void ca_hook_dev_loadout_mission(Ctx* c);
+void ca_hook_dev_loadout_respawn(Ctx* c);
 
 #define R(n) (c->r[n])
 #define F(n) (c->f[n])

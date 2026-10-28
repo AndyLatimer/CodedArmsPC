@@ -70,6 +70,7 @@ endif()
 set(CA_GAME_ISO "" CACHE FILEPATH "Your own Coded Arms (ULES-00124) ISO, needed for the recompiled build")
 set(CA_RECOMP_TRACE "" CACHE STRING "Debug: comma separated guest function addresses to trace")
 option(CA_RECOMP_WATCH "Debug: generate store watchpoints (CA_WATCH_ADDR at run time)" OFF)
+option(CA_RECOMP_PROFILE "Debug: count calls of every recompiled function (runner command profdump)" OFF)
 add_library(ca_psp OBJECT
   src/psp/cpu.cpp
   src/psp/vfpu.cpp
@@ -175,6 +176,9 @@ if(CA_GAME_ISO)
   set(CA_WATCH_ARG "")
   if(CA_RECOMP_WATCH)
     set(CA_WATCH_ARG --watch)
+  endif()
+  if(CA_RECOMP_PROFILE)
+    list(APPEND CA_WATCH_ARG --profile)
   endif()
   message(STATUS "Recompiling BOOT.BIN from ${CA_GAME_ISO}")
   execute_process(

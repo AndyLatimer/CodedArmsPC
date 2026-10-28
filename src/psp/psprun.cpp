@@ -37,6 +37,7 @@
 #include "stb_image_write.h"
 #include "psp/host.h"
 #include "psp/memory.h"
+#include "psp/recomp.h"
 #include "psp/host_dialog.h"
 #include "psp/kernel.h"
 
@@ -242,6 +243,21 @@ void controlThread(std::string path) {
                 std::sscanf(l.c_str(), "%*s %d %d", &x, &y);
                 psp::host::g_ctrl.lx = (uint8_t)x;
                 psp::host::g_ctrl.ly = (uint8_t)y;
+            } else if (c == "profdump") { // profdump FILE: calls per function since the last dump (profile build)
+                if (FILE* o = std::fopen(arg, "w")) {
+                    for (uint32_t i = 0; i < 0x400000 / 4; ++i)
+                        if (g_prof_counts[i]) std::fprintf(o, "%08x %u\n", 0x08804000u + i * 4, g_prof_counts[i]);
+                    std::fclose(o);
+                }
+                std::memset(g_prof_counts, 0, sizeof(uint32_t) * (0x400000 / 4));
+            } else if (c == "poke8") { // poke8 ADDR VALUE (hex address)
+                unsigned a = 0, v = 0;
+                if (std::sscanf(l.c_str(), "%*s %x %u", &a, &v) == 2) psp::write8(a, (uint8_t)v);
+            } else if (c == "dev") { // dev 0|1 [w0 w1 w2 w3 w4]: dev mode loadout
+                int v[6] = {0, 0, 4, 6, 19, 23};
+                int n2 = std::sscanf(l.c_str(), "%*s %d %d %d %d %d %d", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]);
+                psp::host::g_dev.enabled = v[0] != 0;
+                if (n2 == 6) for (int i = 0; i < 5; ++i) psp::host::g_dev.loadout[i] = v[i + 1];
             } else if (c == "ads") { // ads 0|1: aim down sights
                 psp::host::g_ads = std::atoi(arg) != 0;
             } else if (c == "mapshot") { // mapshot FILE: the minimap (256 px, 150 units)

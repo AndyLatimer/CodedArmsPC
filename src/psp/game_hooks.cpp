@@ -24,6 +24,7 @@
 namespace psp::host {
 Aim g_aim;
 std::atomic<bool> g_ads{false};
+DevMode g_dev;
 std::atomic<int> g_targetFps{0};
 }
 
@@ -113,3 +114,20 @@ extern "C" void ca_hook_frame_start(Ctx* c) {
         last = now;
     }
 }
+
+// Dev mode -----------------------------------------------------------------------------------
+// When a mission starts, the game computes the 5 weapon slots from the player's inventory into
+// five s16 item ids on the stack (f_08926d88) and passes them to SetLoadout (0x088612b4). The
+// hooks after the first of those loads replace them with the dev loadout. Item ids: weapons
+// 0-22, grenades 23-32 (in the order of the game's item name table, TECHNICAL_NOTES.md).
+namespace {
+void devLoadout(Ctx* c, uint32_t buf, int firstReg) {
+    auto& d = psp::host::g_dev;
+    if (!d.enabled) return;
+    for (int i = 0; i < 5; ++i) psp::write16(buf + 2 * i, (uint16_t)(int16_t)d.loadout[i]);
+    c->r[firstReg] = (uint32_t)(int32_t)d.loadout[firstReg == 6 ? 1 : 0];
+}
+} // namespace
+
+extern "C" void ca_hook_dev_loadout_mission(Ctx* c) { devLoadout(c, c->r[29] + 36, 6); } // after 0x0890247c
+extern "C" void ca_hook_dev_loadout_respawn(Ctx* c) { devLoadout(c, c->r[29] + 20, 5); } // after 0x08900e18

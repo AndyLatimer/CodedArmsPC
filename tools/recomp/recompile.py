@@ -26,6 +26,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--trace", default="", help="comma separated function addresses to log (debugging)")
     ap.add_argument("--watch", action="store_true", help="debug: report stores to CA_WATCH_ADDR at run time")
+    ap.add_argument("--profile", action="store_true", help="debug: count the calls of every function (profdump)")
     args = ap.parse_args()
     if args.iso:
         data = read_iso_file(args.iso, "PSP_GAME/SYSDIR/BOOT.BIN")
@@ -36,7 +37,7 @@ def main():
     mod = PspModule(data)
     funcs, starts = functions.discover(mod)
     trace = list(funcs) if args.trace == "all" else [int(x, 16) for x in args.trace.split(",") if x]
-    gen, files = codegen.generate(mod, funcs, starts, args.out, trace=trace, watch=args.watch)
+    gen, files = codegen.generate(mod, funcs, starts, args.out, trace=trace, watch=args.watch, profile=args.profile)
     print("functions: %d, files: %d, imports: %d" % (len(funcs), len(files), len(mod.stubs)))
     if gen.unhandled:
         print("UNHANDLED mnemonics:", gen.unhandled)

@@ -54,6 +54,13 @@ extern Aim g_aim;
 // Aim down sights is held (front end); the renderer moves the weapon to the sights (gpu/ads.h).
 extern std::atomic<bool> g_ads;
 
+// Dev mode (front end [dev]): the weapons the player starts missions with (item ids, -1 empty).
+struct DevMode {
+    std::atomic<bool> enabled{false};
+    std::atomic<int> loadout[5] = {0, 4, 6, 19, 23};
+};
+extern DevMode g_dev;
+
 // Frame rate the game is run at: 60 or 30; 0 keeps the game's own (20 fps in missions).
 // Applied when the game sets its frame interval (game_hooks.cpp).
 extern std::atomic<int> g_targetFps;
