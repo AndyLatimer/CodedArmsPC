@@ -10,7 +10,9 @@
 namespace psp {
 
 constexpr uint32_t kAddrMask = 0x0FFFFFFFu;
-constexpr uint32_t kMemSize = 0x0A000000u;
+// The whole masked range is backed, so a stray guest address can never reach host memory
+// outside the block (untouched pages cost no RAM).
+constexpr uint32_t kMemSize = kAddrMask + 1u;
 constexpr uint32_t kScratchpad = 0x00010000u, kScratchpadSize = 0x4000u;
 constexpr uint32_t kVram = 0x04000000u, kVramSize = 0x00200000u;
 constexpr uint32_t kKernelRam = 0x08000000u, kUserRam = 0x08800000u, kRamEnd = 0x0A000000u;

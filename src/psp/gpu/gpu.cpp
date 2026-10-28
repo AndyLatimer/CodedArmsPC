@@ -1116,7 +1116,8 @@ void Recorder::emit(std::vector<Vertex>& vin, int prim, bool through, bool hasCo
     if (!through) ads_.observe(mtx_.view, mtx_.world, vin);
     else if (ads_.hide2D(vin)) return;
     buildUbo(ubo, target, through, hasColor);
-    if (!through) ads_.adjust(mtx_.view, ubo.view, ubo.proj);
+    if (!through) ads_.adjust(mtx_.view, ubo.vpScale[0], ubo.view, ubo.proj);
+
     premulBlend_ = false;
     alphaOverride_ = false;
     buildState(op.st, target, through, prim);

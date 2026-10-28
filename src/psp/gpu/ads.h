@@ -23,26 +23,27 @@ public:
     // A 3D draw (4x3 GE matrices, model-space vertices): classifies it and measures the weapon.
     void observe(const float view[12], const float world[12], const std::vector<Vertex>& verts);
     // Adjusts the uniform matrices (4x4 column-major) of that draw.
-    void adjust(const float view[12], float view44[16], float proj44[16]) const;
+    // `viewportScaleX`: the draw's viewport half width (240 full screen).
+    void adjust(const float view[12], float viewportScaleX, float view44[16], float proj44[16]) const;
     // A 2D (through mode) draw: true to drop it (the crosshair, while aiming).
     bool hide2D(const std::vector<Vertex>& verts) const;
     void endFrame(); // once per presented frame
 
 private:
     static bool isWeaponCamera(const float view[12]);
-    static uint64_t viewKey(const float view[12]);
 
     float t_ = 0;                  // 0 = hip, 1 = aiming
     double lastUs_ = 0;
     std::vector<float> gun_;        // weapon vertices this frame (view space, xyz)
     std::vector<float> front_;      // all weapon-camera vertices ahead of the hands (fallback)
-    std::vector<uint64_t> keys_;    // view of every 3D draw this frame
-    uint64_t mainView_ = 0;         // the player's camera (most draws last frame)
     bool aligned_ = false;          // an alignment was measured for this aim
     size_t alignedVerts_ = 0;       // weapon vertices when it was measured
     int changed_ = 0;               // frames with a different weapon
     float sight_[3] = {0, 0, 0};    // sight point (view space)
     float yaw_ = 0, pitch_ = 0;     // rotation that puts the barrel along -z
+    std::vector<size_t> topIdx_;    // the weapon's top-edge vertices (offsets into gun_)
+    float refTop_[2] = {0, 0};      // their mean x, y when aiming started
+    float sway_[2] = {0, 0};        // their smoothed movement since then
     float adsMat_[16];              // current weapon camera adjustment (column-major)
 };
 

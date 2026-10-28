@@ -237,7 +237,9 @@ void hle_syscall(Ctx* c, uint32_t code) { psp::kernel::fatal(c, "raw syscall %x 
 
 // Debug builds generated with --watch call this before every store.
 // Profile build: one counter per instruction word of the game's code (functions only count).
-extern "C" uint32_t g_prof_counts[0x400000 / 4] = {};
+extern "C" {
+uint32_t g_prof_counts[0x400000 / 4] = {};
+}
 
 extern "C" void rt_watch_store(Ctx* c, uint32_t pc, uint32_t addr) {
     static const uint32_t watch = [] {

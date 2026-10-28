@@ -44,6 +44,7 @@ El código generado se crea en `build/` a partir de la ISO del usuario y nunca s
 - [x] [NUEVO] **Panorámico Hor+** (21:9, 32:9…): la escena 3D se amplía a los lados, el HUD queda centrado, los fundidos/fondos a pantalla completa se estiran, los vídeos van centrados. Verificado a 21:9.
 - [x] Corrección: el alfa del framebuffer de la PSP es el stencil (solo lo cambian ZERO/REPLACE): el brillo (glow) de la misión coincide con PPSSPP.
 - [x] [RE] **60 / 30 fps** (el original va a 20 en las misiones): hook en el fijador de intervalo del juego, fijo por pantalla (`[video] frame_rate`). Ver TECHNICAL_NOTES §15: el jugador va 1,5 veces más rápido que a 20 fps; no hay 45 fps.
+- [x] Estabilidad: memoria del invitado sin accesos fuera del bloque, pila de 16 MB en Windows, registro `CodedArms.log` con informe de cierres.
 - [x] [NUEVO] **Apuntar con la mira** (clic derecho / gatillo izquierdo): el arma se lleva al centro alineando la mira, zoom ligero, sin retícula, sensibilidad reducida; el zoom del juego pasa al botón central. Verificado con la pistola.
 - [x] [NUEVO] **Diálogos del sistema dibujados** (cargar/guardar partida, mensajes) con teclado/mando; corregida la lista de partidas vacía en Windows.
 - [x] [NUEVO] **Teclas de PC en las ayudas de botones** (configuración de teclas, tipo de control, pies de pantalla) según las asignaciones de `config.ini` (`[video] pc_button_hints`).

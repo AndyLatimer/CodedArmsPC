@@ -2,6 +2,7 @@
 // High-level emulation (HLE) of the PSP kernel for recompiled code: module loading,
 // threads and scheduling, synchronisation objects and the import dispatch table.
 #include <cstdint>
+#include <cstdio>
 #include <functional>
 #include <string>
 
@@ -51,6 +52,8 @@ bool callImportByAddress(Ctx* c, uint32_t addr);
 // Scheduling helpers for HLE modules (call with no kernel lock held) -----------------
 uint64_t nowUs();                         // microseconds since boot
 int currentThreadId();
+// Crash reports: the current guest thread and its last system call.
+void describeCrash(FILE* out);
 // Blocks the calling guest thread until `ready()` returns true or `timeoutUs` (0 = none)
 // elapses. `ready` is evaluated under the kernel lock. Returns false on timeout.
 bool waitUntil(const std::function<bool()>& ready, uint64_t timeoutUs, bool processCallbacks = false);

@@ -9,7 +9,7 @@ Partition g_userPartition;
 
 bool initMemory() {
     if (g_mem) return true;
-    g_mem = static_cast<uint8_t*>(std::calloc(1, kMemSize));
+    g_mem = static_cast<uint8_t*>(std::calloc(1, kMemSize + 64)); // + room for an access straddling the end
     return g_mem != nullptr;
 }
 

@@ -6,7 +6,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <unordered_map>
 
 #include "psp/host.h"
 
@@ -17,6 +16,7 @@ namespace {
 constexpr float kZoom = 1.3f;       // field of view narrowed by this factor while aiming
 constexpr float kTransitionS = 0.15f;
 constexpr float kCloser = 0.8f;     // the weapon comes this much towards the eye
+constexpr float kSteady = 0.85f;    // share of the weapon's sway taken out while aiming
 
 using Mat = float[16]; // column-major
 
@@ -45,16 +45,6 @@ double nowUs() {
 
 } // namespace
 
-uint64_t AimDownSights::viewKey(const float view[12]) {
-    uint64_t h = 1469598103934665603ull;
-    for (int i = 0; i < 12; ++i) {
-        uint32_t v;
-        std::memcpy(&v, &view[i], 4);
-        h = (h ^ v) * 1099511628211ull;
-    }
-    return h;
-}
-
 // The weapon's camera: near the origin, axes along the view's (this game's is turned 180 degrees).
 bool AimDownSights::isWeaponCamera(const float* v) {
     float c[3];
@@ -63,15 +53,6 @@ bool AimDownSights::isWeaponCamera(const float* v) {
 }
 
 void AimDownSights::observe(const float view[12], const float world[12], const std::vector<Vertex>& verts) {
-    keys_.push_back(viewKey(view));
-    static const bool dbg = std::getenv("CA_ADS_DEBUG") != nullptr;
-    if (dbg) {
-        float c[3];
-        for (int k = 0; k < 3; ++k) c[k] = -(view[3 * k] * view[9] + view[3 * k + 1] * view[10] + view[3 * k + 2] * view[11]);
-        if (std::fabs(c[0]) + std::fabs(c[1]) + std::fabs(c[2]) < 20)
-            std::fprintf(stderr, "[ADS] near view %.2f %.2f %.2f / %.2f %.2f %.2f / %.2f %.2f %.2f c %.1f %.1f %.1f\n", view[0], view[1],
-                         view[2], view[3], view[4], view[5], view[6], view[7], view[8], c[0], c[1], c[2]);
-    }
     if (!isWeaponCamera(view) || verts.empty()) return;
     std::vector<float> pts;
     pts.reserve(verts.size() * 3);
@@ -95,12 +76,6 @@ void AimDownSights::endFrame() {
     lastUs_ = now;
     const bool want = host::g_ads.load();
 
-    // The player's camera: the view of most 3D draws.
-    std::unordered_map<uint64_t, int> counts;
-    int best = 0;
-    for (uint64_t k : keys_)
-        if (++counts[k] > best) { best = counts[k]; mainView_ = k; }
-    keys_.clear();
 
     // Measure the weapon when aiming starts (from hip), then keep that alignment; measure again
     // when a different weapon appears (its vertex count changes for a few frames).
@@ -119,8 +94,10 @@ void AimDownSights::endFrame() {
         const float edge = maxY - 0.12f * (maxY - minY);
         // Least squares over the top edge: x = a + b z, y = c + d z.
         double n = 0, sz = 0, szz = 0, sx = 0, sxz = 0, sy = 0, syz = 0;
+        topIdx_.clear();
         for (size_t i = 0; i < gun_.size(); i += 3) {
             if (gun_[i + 1] < edge) continue;
+            topIdx_.push_back(i);
             const double x = gun_[i], y = gun_[i + 1], z = gun_[i + 2];
             n += 1; sz += z; szz += z * z; sx += x; sxz += x * z; sy += y; syz += y * z;
         }
@@ -135,12 +112,23 @@ void AimDownSights::endFrame() {
             pitch_ = (float)std::atan2(std::clamp(d, -0.5, 0.5), std::sqrt(1 + b * b));
             aligned_ = true;
             alignedVerts_ = gunVerts;
+            refTop_[0] = (float)(sx / n);
+            refTop_[1] = (float)(sy / n);
+            sway_[0] = sway_[1] = 0;
         }
+    } else if (want && aligned_ && gunVerts == alignedVerts_ && !topIdx_.empty()) {
+        // Steady aim: the same top-edge vertices as when aiming started; most of the weapon's
+        // own sway and bob since then is taken out (smoothed, so it does not shake).
+        double mx = 0, my = 0;
+        for (size_t i : topIdx_) { mx += gun_[i]; my += gun_[i + 1]; }
+        const float dx = (float)(mx / topIdx_.size()) - refTop_[0], dy = (float)(my / topIdx_.size()) - refTop_[1];
+        sway_[0] += (dx - sway_[0]) * 0.5f;
+        sway_[1] += (dy - sway_[1]) * 0.5f;
     }
     static const bool dbg = std::getenv("CA_ADS_DEBUG") != nullptr;
     if (dbg && want)
-        std::fprintf(stderr, "[ADS] gun %zu aligned %d t %.2f sight %.2f,%.2f,%.2f yaw %.3f pitch %.3f main %d\n", gun_.size() / 3,
-                     (int)aligned_, t_, sight_[0], sight_[1], sight_[2], yaw_, pitch_, best);
+        std::fprintf(stderr, "[ADS] gun %zu aligned %d t %.2f sight %.2f,%.2f,%.2f yaw %.3f pitch %.3f sway %.3f,%.3f\n",
+                     gun_.size() / 3, (int)aligned_, t_, sight_[0], sight_[1], sight_[2], yaw_, pitch_, sway_[0], sway_[1]);
     gun_.clear();
 
     const float target = (want && aligned_) ? 1.0f : 0.0f;
@@ -154,17 +142,17 @@ void AimDownSights::endFrame() {
     translate(a, sight_[0] * (1 - s), sight_[1] * (1 - s), sight_[2] + kCloser * s);
     rotX(b, pitch_ * s);
     rotY(c, yaw_ * s);
-    translate(d, -sight_[0], -sight_[1], -sight_[2]);
+    translate(d, -sight_[0] - sway_[0] * kSteady * s, -sight_[1] - sway_[1] * kSteady * s, -sight_[2]);
     mul(a, b, adsMat_);
     mul(adsMat_, c, adsMat_);
     mul(adsMat_, d, adsMat_);
 }
 
-void AimDownSights::adjust(const float view[12], float view44[16], float proj44[16]) const {
+void AimDownSights::adjust(const float view[12], float viewportScaleX, float view44[16], float proj44[16]) const {
     if (t_ <= 0) return;
     if (isWeaponCamera(view)) {
         mul(adsMat_, view44, view44);
-    } else if (viewKey(view) == mainView_) {
+    } else if (std::fabs(viewportScaleX) > 200) { // the player's view (full screen; the radar is small)
         const float s = t_ * t_ * (3 - 2 * t_);
         const float z = 1 + (kZoom - 1) * s;
         proj44[0] *= z;
@@ -177,9 +165,10 @@ bool AimDownSights::hide2D(const std::vector<Vertex>& verts) const {
     float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
     for (const Vertex& v : verts)
         for (int k = 0; k < 2; ++k) { lo[k] = std::min(lo[k], v.pos[k]); hi[k] = std::max(hi[k], v.pos[k]); }
-    // The crosshair: small and centred on the screen (480x272).
-    const float cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2;
-    return std::fabs(cx - 240) < 8 && std::fabs(cy - 136) < 8 && hi[0] - lo[0] < 80 && hi[1] - lo[1] < 80;
+    // The crosshair: small pieces wholly inside the middle of the screen (480x272); while the
+    // player moves it opens into separate ticks around the centre.
+    return lo[0] > 240 - 56 && hi[0] < 240 + 56 && lo[1] > 136 - 56 && hi[1] < 136 + 56 && hi[0] - lo[0] < 80 &&
+           hi[1] - lo[1] < 80;
 }
 
 } // namespace psp::gpu

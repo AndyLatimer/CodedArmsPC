@@ -262,3 +262,10 @@ recompilado) y ejecuciones de PPSSPPHeadless sobre la misma ISO.
 - `psp/gpu/ads.cpp`: la vista del arma se multiplica por T(mira→eje, 0,8 más cerca)·Rx·Ry·T(−mira) interpolado en 0,15 s; la proyección de la cámara del jugador se estrecha ×1,3; la retícula (dibujo 2D pequeño centrado en 240,136) se oculta. La lógica del juego no cambia: los disparos siguen yendo al centro, donde queda la punta del alza (comprobado con una captura ampliada).
 - Front end: `aim_down_sights = mouse:right, pad:lefttrigger`; el zoom del juego (cruceta arriba) pasa al botón central; `[input] ads_sensitivity` (0,6), `ads_toggle`. Los botones del ratón se leen de los eventos de SDL (el sondeo perdía pulsaciones en modo relativo).
 - Sin verificar con otras armas (en el entrenamiento solo hay pistola; la demo del título es un vídeo).
+- Corregido (temblor): el zoom se aplicaba solo si la vista coincidía con la del fotograma anterior, así que al mover la cámara se ponía y quitaba; ahora se aplica a todo dibujo 3D a pantalla completa que no sea del arma (el radar usa un viewport de escala 50, el jugador 240). El arma: se guardan los vértices del borde superior al alinear y cada fotograma se quita el 85 % de su movimiento (balanceo al andar/en reposo), suavizado. La retícula se abre en marcas al moverse: se ocultan las piezas 2D pequeñas dentro de ±56 px del centro.
+
+## 20. Estabilidad
+- La memoria del invitado cubre ahora todo el rango enmascarado (0x10000000 + 64 bytes): antes eran 0x0A000000 y un puntero del juego por encima se convertía en un acceso fuera del bloque del host (cierre o corrupción).
+- Windows: reserva de pila del ejecutable 16 MB (`-Wl,--stack`); los hilos de `std::thread` (cada hilo del juego) heredan la del ejecutable, 1 MB por defecto.
+- Registro: en Windows stderr va a `CodedArms.log` junto al .exe; ante una excepción, `abort` o `std::terminate` se añaden el código, la dirección (`CodedArms.exe+0x…`, traducible con `build/win64/CodedArms.map`), el hilo del juego y su última llamada al sistema (`kernel::describeCrash`), y se avisa al jugador. `CA_TEST_CRASH=1` provoca un fallo a los 5 s para comprobarlo.
+

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "core/Config.h"
+#include "frontend/CrashLog.h"
 #include "frontend/DialogOverlay.h"
 #include "platform/Input.h"
 #include "psp/gpu/button_glyphs.h"
@@ -444,6 +446,16 @@ std::string findIso(const std::string& configured) {
 } // namespace
 
 int main(int argc, char** argv) {
+    {
+        std::string dir;
+        if (char* b = SDL_GetBasePath()) { dir = b; SDL_free(b); }
+        ca::initCrashLog(dir);
+    }
+    if (std::getenv("CA_TEST_CRASH")) // checks the crash report: an invalid write after 5 s
+        std::thread([] {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            *static_cast<volatile int*>(nullptr) = 1;
+        }).detach();
     FrontSettings s;
     ca::Ini ini;
     const std::string cfgPath = ca::resolveConfigPath();

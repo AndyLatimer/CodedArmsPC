@@ -198,14 +198,18 @@ if(CA_GAME_ISO)
   endif()
 
   # The game: recompiled code + HLE runtime + native front end.
-  add_executable(CodedArms WIN32 src/frontend/Main.cpp src/frontend/DialogOverlay.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
+  add_executable(CodedArms WIN32 src/frontend/Main.cpp src/frontend/DialogOverlay.cpp src/frontend/CrashLog.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
   target_include_directories(CodedArms PRIVATE src)
   if(TARGET SDL2::SDL2main)
     target_link_libraries(CodedArms PRIVATE SDL2::SDL2main)
   endif()
   target_link_libraries(CodedArms PRIVATE ca_engine ca_at3 ca_ffmpeg Threads::Threads SDL2::SDL2)
   if(MINGW)
-    target_link_options(CodedArms PRIVATE -static-libgcc -static-libstdc++ -static)
+    # Threads created without an explicit size get the executable's stack reserve: 1 MB by
+    # default on Windows (8 MB on Linux); every guest thread runs on one. The map file turns
+    # crash report offsets (CodedArms.exe+0x...) into functions.
+    target_link_options(CodedArms PRIVATE -static-libgcc -static-libstdc++ -static -Wl,--stack,16777216
+                        -Wl,-Map=${CMAKE_BINARY_DIR}/CodedArms.map)
   endif()
 
   add_executable(ca_psprun src/psp/psprun.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
@@ -213,7 +217,7 @@ if(CA_GAME_ISO)
   target_link_libraries(ca_psprun PRIVATE ca_at3 ca_ffmpeg Threads::Threads SDL2::SDL2)
   target_include_directories(ca_psprun SYSTEM PRIVATE third_party/stb)
   if(MINGW)
-    target_link_options(ca_psprun PRIVATE -static-libgcc -static-libstdc++ -static)
+    target_link_options(ca_psprun PRIVATE -static-libgcc -static-libstdc++ -static -Wl,--stack,16777216)
   endif()
 endif()
 

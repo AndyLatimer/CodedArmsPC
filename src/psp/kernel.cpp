@@ -437,8 +437,22 @@ static void hleStats(const std::string& name, uint32_t ra) {
     counts.clear();
 }
 
+// The last system call of each thread, for crash reports (describeCrash).
+static thread_local int t_lastImport = -1;
+static thread_local uint32_t t_lastImportRa = 0;
+
+void describeCrash(FILE* out) {
+    if (t_self) std::fprintf(out, "[CRASH] guest thread %d '%s'\n", t_self->id, t_self->name.c_str());
+    else std::fprintf(out, "[CRASH] not a guest thread\n");
+    if (t_lastImport >= 0 && (size_t)t_lastImport < g_imports.size())
+        std::fprintf(out, "[CRASH] its last system call: %s, returning to %08x\n", g_imports[(size_t)t_lastImport].name.c_str(),
+                     t_lastImportRa);
+}
+
 extern "C" void hle_call(Ctx* c, int idx) {
     ImportSlot& s = g_imports[(size_t)idx];
+    t_lastImport = idx;
+    t_lastImportRa = c->r[31];
     static const bool stats = std::getenv("CA_HLE_STATS") != nullptr;
     static const bool byThread = stats && std::getenv("CA_HLE_STATS")[0] == 't';
     if (stats) hleStats(s.name, byThread ? (uint32_t)currentThreadId() : c->r[31]);
