@@ -50,7 +50,10 @@ void registerHle(const char* name, HleFn fn);
 bool callImportByAddress(Ctx* c, uint32_t addr);
 
 // Scheduling helpers for HLE modules (call with no kernel lock held) -----------------
-uint64_t nowUs();                         // microseconds since boot
+uint64_t nowUs();                         // microseconds since boot (stops while paused)
+// Pauses the game (front end menus): the guest clock stops and guest threads stop at their
+// next system call until it is resumed.
+void setPaused(bool paused);
 int currentThreadId();
 // Crash reports: the current guest thread and its last system call.
 void describeCrash(FILE* out);

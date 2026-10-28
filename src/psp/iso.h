@@ -22,10 +22,15 @@ public:
     bool lookup(const std::string& path, IsoEntry& out);
     bool listDir(const std::string& path, std::vector<IsoEntry>& out);
     size_t read(uint32_t lba, uint64_t offset, void* dst, size_t len);
+    // Replaces bytes of the disc image as they are read (the port's text changes; the file is
+    // not modified). Applied only if the image holds `expect` at `pos`; returns whether it did.
+    bool addPatch(uint64_t pos, const std::string& expect, const std::string& bytes);
     uint32_t totalSectors() const { return totalSectors_; }
 
 private:
     bool readDir(uint32_t lba, uint32_t size, std::vector<IsoEntry>& out);
+    struct Patch { uint64_t pos; std::string bytes; };
+    std::vector<Patch> patches_;
     FILE* f_ = nullptr;
     std::mutex mutex_;
     IsoEntry root_;

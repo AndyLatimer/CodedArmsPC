@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -21,6 +22,7 @@
 #include "core/Config.h"
 #include "frontend/CrashLog.h"
 #include "frontend/DialogOverlay.h"
+#include "frontend/OptionsMenu.h"
 #include "platform/Input.h"
 #include "psp/gpu/button_glyphs.h"
 #include "psp/gpu/gpu.h"
@@ -209,13 +211,18 @@ struct InputState {
     // Mouse buttons from SDL events (more reliable than polling in relative mode); `mouseClicked`
     // keeps presses released before the next frame so short clicks are not lost.
     Uint32 mouseHeld = 0, mouseClicked = 0;
+    // Keys pressed since the last frame, so a press released within one frame is not lost.
+    bool keyClicked[SDL_NUM_SCANCODES] = {};
     bool wheelUp = false, wheelDown = false;
+    bool waitRelease = false; // after a menu closes: no input to the game until all are released
+    bool confirmWasHeld = false;
+    bool openPcSettings = false; // the PC SETUP row of the game's OPTIONS was confirmed
 };
 
 bool bindingHeld(const ca::Binding& b, InputState& in, const Uint8* keys, Uint32 mouse) {
     using T = ca::Binding::Type;
     switch (b.type) {
-    case T::Key: return keys[b.code] != 0;
+    case T::Key: return keys[b.code] != 0 || in.keyClicked[b.code];
     case T::MouseButton: return (mouse & SDL_BUTTON(b.code)) != 0;
     case T::MouseWheelUp: return in.wheelUp;
     case T::MouseWheelDown: return in.wheelDown;
@@ -237,11 +244,35 @@ void updateController(const FrontSettings& s, InputState& in, bool focused, floa
     const Uint8* keys = SDL_GetKeyboardState(nullptr);
     Uint32 mouse = focused ? (in.mouseHeld | in.mouseClicked) : 0;
     in.mouseClicked = 0;
+    struct ClearKeys { InputState& in; ~ClearKeys() { std::fill(std::begin(in.keyClicked), std::end(in.keyClicked), false); } } clearKeys{in};
     uint32_t buttons = 0;
     bool held[IN_COUNT] = {};
     for (int i = 0; i < IN_COUNT; ++i)
         for (const auto& b : s.bindings[i])
             if (bindingHeld(b, in, keys, mouse)) held[i] = true;
+    if (in.waitRelease) {
+        if (std::any_of(std::begin(held), std::end(held), [](bool h) { return h; })) {
+            psp::host::g_ctrl.buttons = 0;
+            psp::host::g_ctrl.lx = psp::host::g_ctrl.ly = 128;
+            psp::host::g_ads = false;
+            in.wheelUp = in.wheelDown = false;
+            in.lookAccumX = in.lookAccumY = 0;
+            return;
+        }
+        in.waitRelease = false;
+    }
+    // The game's OPTIONS screen with its PC SETUP row selected (the old ACCEPT CHALLENGE,
+    // game_hooks.cpp): confirm opens the PC settings; the game does not see confirm or
+    // left/right there, so the multiplayer option stays off.
+    const uint64_t nowUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(
+                               std::chrono::steady_clock::now().time_since_epoch()).count();
+    const bool onPcRow = psp::host::g_gameOptions.row == 3 && nowUs - psp::host::g_gameOptions.seenUs < 250000;
+    const bool confirm = held[IN_CROSS];
+    if (onPcRow) {
+        if (confirm && !in.confirmWasHeld) in.openPcSettings = true;
+        for (int k : {IN_CROSS, IN_LEFT, IN_RIGHT, IN_SQUARE, IN_STICK_LEFT, IN_STICK_RIGHT}) held[k] = false;
+    }
+    in.confirmWasHeld = confirm;
     for (int i = 0; i < 12; ++i) if (held[i]) buttons |= kInputButtons[i];
 
     // Aim down sights (drawn by the renderer, gpu/ads.h); slower look while aiming.
@@ -281,6 +312,7 @@ void updateController(const FrontSettings& s, InputState& in, bool focused, floa
     if (held[IN_STICK_RIGHT]) ax = 1;
     if (held[IN_STICK_UP]) ay = -1;
     if (held[IN_STICK_DOWN]) ay = 1;
+    if (onPcRow) ax = 0;
     if (ax != 0 && ay != 0 && (held[IN_STICK_LEFT] || held[IN_STICK_RIGHT]) && (held[IN_STICK_UP] || held[IN_STICK_DOWN])) {
         ax *= 0.7071f;
         ay *= 0.7071f;
@@ -438,6 +470,238 @@ GLuint makeProgram(const char* vs, const char* fs) {
     return p;
 }
 
+// ---- options menu (F1) ------------------------------------------------------------------------
+
+const char* const kInputLabels[IN_COUNT] = {
+    "Arriba - zoom del juego", "Abajo - recargar", "Izquierda - arma anterior", "Derecha - arma siguiente",
+    "Cruz - mirar abajo / aceptar", "Círculo - girar a la derecha / atrás", "Cuadrado - girar a la izquierda",
+    "Triángulo - mirar arriba", "L - saltar", "R - disparar", "Start - mapa", "Select - pausa",
+    "Stick - avanzar", "Stick - retroceder", "Stick - paso a la izquierda", "Stick - paso a la derecha",
+    "Apuntar con la mira"};
+
+// 0 keyboard, 1 mouse, 2 pad: a new binding replaces those of its own kind only.
+int bindingDevice(const ca::Binding& b) {
+    using T = ca::Binding::Type;
+    return b.type == T::Key ? 0 : (b.type == T::PadButton || b.type == T::PadTrigger ? 2 : 1);
+}
+
+std::string bindingLabel(const ca::Binding& b) {
+    using T = ca::Binding::Type;
+    switch (b.type) {
+    case T::Key: return SDL_GetScancodeName(SDL_Scancode(b.code));
+    case T::MouseButton: {
+        static const char* n[] = {"Ratón", "Ratón izq.", "Ratón central", "Ratón der.", "Ratón 4", "Ratón 5"};
+        return b.code >= 1 && b.code <= 5 ? n[b.code] : n[0];
+    }
+    case T::MouseWheelUp: return "Rueda arriba";
+    case T::MouseWheelDown: return "Rueda abajo";
+    case T::PadButton: {
+        const char* n = SDL_GameControllerGetStringForButton(SDL_GameControllerButton(b.code));
+        return std::string("Mando ") + (n ? n : "?");
+    }
+    case T::PadTrigger: return b.code == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? "Mando LT" : "Mando RT";
+    }
+    return "?";
+}
+
+std::string bindingsLabel(const std::vector<ca::Binding>& list) {
+    std::string out;
+    for (const ca::Binding& b : list) out += (out.empty() ? "" : " / ") + bindingLabel(b);
+    return out.empty() ? "-" : out;
+}
+
+void setBindingText(FrontSettings& s, int i) {
+    std::string t;
+    for (const ca::Binding& b : s.bindings[i]) t += (t.empty() ? "" : ", ") + ca::describeBinding(b);
+    s.bindingText[i] = t;
+}
+
+// `b` becomes input `i`'s binding of its kind (keyboard, mouse or pad), replacing the others of
+// that kind, and is taken off any other input.
+void assignBinding(FrontSettings& s, int i, const ca::Binding& b) {
+    auto same = [&](const ca::Binding& x) { return x.type == b.type && x.code == b.code; };
+    for (int j = 0; j < IN_COUNT; ++j) {
+        auto& l = s.bindings[j];
+        const size_t n = l.size();
+        if (j == i) l.erase(std::remove_if(l.begin(), l.end(), [&](const ca::Binding& x) { return bindingDevice(x) == bindingDevice(b); }), l.end());
+        else l.erase(std::remove_if(l.begin(), l.end(), same), l.end());
+        if (j == i) l.insert(l.begin(), b);
+        if (j == i || l.size() != n) setBindingText(s, j);
+    }
+}
+
+struct MenuState {
+    ca::OptionsMenu menu;
+    int capture = -1;          // input waiting for a key (-1: none)
+    bool quit = false;
+};
+
+std::string onOff(bool v) { return v ? "Sí" : "No"; }
+
+ca::MenuItem header(const char* label) {
+    ca::MenuItem m;
+    m.label = label;
+    m.header = true;
+    return m;
+}
+
+ca::MenuItem toggle(const char* label, bool& v, std::function<void()> apply = {}, const char* note = "") {
+    ca::MenuItem m;
+    m.label = label;
+    m.value = [&v] { return onOff(v); };
+    m.change = [&v, apply](int) { v = !v; if (apply) apply(); };
+    m.note = note;
+    return m;
+}
+
+ca::MenuItem choice(const char* label, std::vector<std::string> names, std::function<int()> get, std::function<void(int)> set,
+                    const char* note = "") {
+    ca::MenuItem m;
+    m.label = label;
+    m.value = [names, get] { int k = get(); return k >= 0 && k < (int)names.size() ? names[(size_t)k] : "?"; };
+    m.change = [n = (int)names.size(), get, set](int d) { set(((std::max(0, get()) + d) % n + n) % n); };
+    m.note = note;
+    return m;
+}
+
+ca::MenuItem slider(const char* label, float& v, float lo, float hi, float step, bool percent, std::function<void()> apply = {}) {
+    ca::MenuItem m;
+    m.label = label;
+    m.value = [&v, percent] {
+        char b[32];
+        if (percent) std::snprintf(b, sizeof b, "%d %%", (int)std::lround(v * 100));
+        else std::snprintf(b, sizeof b, "%.1f", v);
+        return std::string(b);
+    };
+    m.change = [&v, lo, hi, step, apply](int d) {
+        v = std::clamp(std::round((v + d * step) / step) * step, lo, hi);
+        if (apply) apply();
+    };
+    return m;
+}
+
+std::vector<ca::MenuItem> buildMenu(FrontSettings& s, SDL_Window* win, MenuState& st) {
+    std::vector<ca::MenuItem> m;
+    m.push_back(header("Vídeo"));
+    m.push_back(choice("Pantalla", {"Ventana", "Pantalla completa"},
+                       [win] { return (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) ? 1 : 0; },
+                       [&s, win](int v) {
+                           s.fullscreen = v;
+                           SDL_SetWindowFullscreen(win, v ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+                       }));
+    static const int kSizes[][2] = {{960, 544}, {1280, 720}, {1600, 900}, {1920, 1080}, {2560, 1440}, {3840, 2160}};
+    m.push_back(choice("Tamaño de la ventana", {"960 x 544", "1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440", "3840 x 2160"},
+                       [&s] {
+                           for (int k = 0; k < 6; ++k) if (s.width == kSizes[k][0] && s.height == kSizes[k][1]) return k;
+                           return -1;
+                       },
+                       [&s, win](int k) {
+                           s.width = kSizes[k][0];
+                           s.height = kSizes[k][1];
+                           if (!(SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN)) {
+                               SDL_SetWindowSize(win, s.width, s.height);
+                               SDL_SetWindowPosition(win, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+                           }
+                       }));
+    m.push_back(toggle("Sincronización vertical", s.vsync, [&s] { SDL_GL_SetSwapInterval(s.vsync ? 1 : 0); }));
+    m.push_back(choice("Fotogramas por segundo", {"60", "30", "Original (20 en misiones)"},
+                       [&s] { return s.frameRate >= 60 ? 0 : (s.frameRate >= 30 ? 1 : 2); },
+                       [&s](int k) {
+                           s.frameRate = k == 0 ? 60 : (k == 1 ? 30 : 0);
+                           psp::host::g_targetFps = s.frameRate;
+                       },
+                       "al cambiar de pantalla"));
+    m.push_back(choice("Resolución interna", {"Automática", "1x", "2x", "3x", "4x", "5x", "6x"},
+                       [&s] { return std::clamp(s.renderScale, 0, 6); }, [&s](int k) { s.renderScale = k; }, "al reiniciar"));
+    m.push_back(choice("Panorámico", {"No (480x272)", "Sí"}, [&s] { return s.widescreen ? 1 : 0; },
+                       [&s](int k) { s.widescreen = k; }, "al reiniciar"));
+    m.push_back(toggle("Estirar la imagen a la ventana", s.stretch));
+    m.push_back(toggle("Suavizar la imagen", s.linearOutput));
+    m.push_back(toggle("Teclas del PC en las ayudas", s.pcButtonHints, {}, "al reiniciar"));
+
+    m.push_back(header("Audio"));
+    m.push_back(slider("Volumen", s.volume, 0, 1, 0.05f, true, [&s] { g_volume = s.volume; }));
+
+    m.push_back(header("Ratón"));
+    m.push_back(slider("Sensibilidad horizontal", s.mouseSensX, 0.1f, 5, 0.1f, false));
+    m.push_back(slider("Sensibilidad vertical", s.mouseSensY, 0.1f, 5, 0.1f, false));
+    m.push_back(toggle("Invertir eje vertical", s.invertY));
+    m.push_back(toggle("Invertir eje horizontal", s.invertX));
+    m.push_back(slider("Sensibilidad al apuntar con la mira", s.adsSens, 0.1f, 2, 0.1f, false));
+    m.push_back(choice("Apuntar con la mira", {"Mantener", "Pulsar para alternar"}, [&s] { return s.adsToggle ? 1 : 0; },
+                       [&s](int k) { s.adsToggle = k != 0; }));
+
+    m.push_back(header("Mando"));
+    m.push_back(slider("Sensibilidad horizontal", s.padSensX, 0.1f, 3, 0.1f, false));
+    m.push_back(slider("Sensibilidad vertical", s.padSensY, 0.1f, 3, 0.1f, false));
+    m.push_back(toggle("Invertir eje vertical", s.padInvertY));
+    m.push_back(slider("Zona muerta del stick izquierdo", s.deadzone, 0, 0.5f, 0.05f, true));
+    m.push_back(slider("Zona muerta del stick derecho", s.deadzoneRight, 0, 0.5f, 0.05f, true));
+
+    m.push_back(header("Controles (Intro y pulsa la tecla nueva)"));
+    for (int i = 0; i < IN_COUNT; ++i) {
+        ca::MenuItem it;
+        it.label = kInputLabels[i];
+        it.value = [&s, i] { return bindingsLabel(s.bindings[i]); };
+        it.activate = [&st, i] {
+            st.capture = i;
+            st.menu.setPrompt(std::string("Pulsa la tecla, botón del ratón o del mando (F1 cancela)"));
+        };
+        m.push_back(it);
+    }
+    {
+        ca::MenuItem it;
+        it.label = "Restaurar los controles por defecto";
+        it.activate = [&s] {
+            for (int i = 0; i < IN_COUNT; ++i) {
+                s.bindingText[i] = kDefaultBindings[i];
+                parseList(s.bindingText[i], s.bindings[i]);
+            }
+            if (s.pcButtonHints) installButtonLabels(s);
+        };
+        m.push_back(it);
+    }
+
+    m.push_back(header("Otros"));
+    m.push_back(toggle("Modo dev (todas las armas, F5/F6)", s.dev, [&s] { psp::host::g_dev.enabled = s.dev; },
+                       "desde el siguiente nivel"));
+    {
+        ca::MenuItem it;
+        it.label = "Volver";
+        it.help = "Vuelve a Options. Los cambios se guardan en config.ini.";
+        it.activate = [&st] { st.menu.close(); };
+        m.push_back(it);
+    }
+    static const std::pair<const char*, const char*> kHelp[] = {
+        {"Pantalla", "Ventana o pantalla completa (también con F11)."},
+        {"Tamaño de la ventana", "Tamaño de la ventana cuando no está a pantalla completa."},
+        {"Sincronización vertical", "Sincroniza con el monitor para evitar cortes en la imagen."},
+        {"Fotogramas por segundo", "60 o 30; Original = 20 en las misiones, como en la PSP."},
+        {"Resolución interna", "Resolución a la que se dibuja el juego (Automática: según la ventana)."},
+        {"Panorámico", "Amplía la vista al formato de la ventana (16:9, 21:9...)."},
+        {"Estirar la imagen a la ventana", "Llena la ventana sin mantener la proporción."},
+        {"Suavizar la imagen", "Filtro bilineal al escalar la imagen a la ventana."},
+        {"Teclas del PC en las ayudas", "Muestra las teclas del PC en lugar de los botones de la PSP."},
+        {"Volumen", "Volumen general del juego."},
+        {"Sensibilidad horizontal", "Velocidad de giro."},
+        {"Sensibilidad vertical", "Velocidad al mirar arriba y abajo."},
+        {"Invertir eje vertical", "Invierte arriba y abajo al mirar."},
+        {"Invertir eje horizontal", "Invierte izquierda y derecha al girar."},
+        {"Sensibilidad al apuntar con la mira", "Velocidad del ratón y del mando mientras se apunta con la mira."},
+        {"Apuntar con la mira", "Mantener pulsado para apuntar, o pulsar una vez para alternar."},
+        {"Zona muerta del stick izquierdo", "Movimiento del stick que se ignora (desgaste del mando)."},
+        {"Zona muerta del stick derecho", "Movimiento del stick que se ignora (desgaste del mando)."},
+        {"Restaurar los controles por defecto", "Vuelve a la configuración de teclas inicial."},
+        {"Modo dev (todas las armas, F5/F6)", "Pruebas: todas las armas y munición infinita; F5/F6 cambian el arma."},
+    };
+    for (ca::MenuItem& it : m) {
+        if (it.header || !it.help.empty()) continue;
+        for (const auto& h : kHelp) if (it.label == h.first) it.help = h.second;
+        if (it.help.empty() && it.activate && it.value) it.help = "Pulsa " + keyName(s.bindings[IN_CROSS]) + " y después la tecla o el botón nuevo.";
+    }
+    return m;
+}
+
 std::string findIso(const std::string& configured) {
     if (!configured.empty()) return configured;
     std::string base;
@@ -584,12 +848,115 @@ int main(int argc, char** argv) {
     Uint64 lastTicks = SDL_GetPerformanceCounter();
     psp::gpu::PresentInfo frame;
     bool haveFrame = false, running = true, focused = true;
+    // PC settings, opened from the game's OPTIONS screen (its PC SETUP row): the game is paused
+    // while they are open.
+    MenuState menu;
+    bool menuActive = false;
+    auto openMenu = [&] {
+        menu.menu.open(buildMenu(s, win, menu));
+        menu.menu.setFooter("<> Cambiar   " + keyName(s.bindings[IN_CROSS]) + " OK   " + keyName(s.bindings[IN_CIRCLE]) + "/Esc Volver");
+        menu.menu.setTitle("PC Setup");
+        menuActive = true;
+        psp::kernel::setPaused(true);
+        SDL_SetRelativeMouseMode(SDL_FALSE);
+    };
+    auto toOverlay = [&](int mx, int my, int& ox, int& oy) {
+        int ww = 1, wh = 1;
+        SDL_GetWindowSize(win, &ww, &wh);
+        const float aspect = 480.0f / 272.0f, wa = (float)ww / (float)std::max(wh, 1);
+        float sx = 1, sy = 1;
+        if (wa > aspect) sx = aspect / wa; else sy = wa / aspect;
+        ox = (int)(((2.0f * mx / std::max(ww, 1) - 1) + sx) / (2 * sx) * ca::kOverlayW);
+        oy = (int)(((2.0f * my / std::max(wh, 1) - 1) + sy) / (2 * sy) * ca::kOverlayH);
+    };
+    auto captureBinding = [&](ca::Binding b) {
+        assignBinding(s, menu.capture, b);
+        menu.capture = -1;
+        menu.menu.setPrompt("");
+    };
+    // Menu input; true when the event was used.
+    auto menuEvent = [&](const SDL_Event& ev) {
+        using BT = ca::Binding::Type;
+        switch (ev.type) {
+        case SDL_KEYDOWN: {
+            if (ev.key.repeat && menu.capture >= 0) return true;
+            const SDL_Scancode k = ev.key.keysym.scancode;
+            if (menu.capture >= 0) {
+                if (k == SDL_SCANCODE_F1) { menu.capture = -1; menu.menu.setPrompt(""); }
+                else captureBinding(ca::Binding{BT::Key, (int)k});
+                return true;
+            }
+            auto bound = [&](int input) {
+                for (const ca::Binding& b : s.bindings[input]) if (b.type == BT::Key && b.code == (int)k) return true;
+                return false;
+            };
+            if (k == SDL_SCANCODE_ESCAPE || bound(IN_CIRCLE) || bound(IN_TRIANGLE)) menu.menu.close();
+            else if (k == SDL_SCANCODE_UP || k == SDL_SCANCODE_W) menu.menu.move(-1);
+            else if (k == SDL_SCANCODE_DOWN || k == SDL_SCANCODE_S) menu.menu.move(1);
+            else if (k == SDL_SCANCODE_LEFT || k == SDL_SCANCODE_A) menu.menu.change(-1);
+            else if (k == SDL_SCANCODE_RIGHT || k == SDL_SCANCODE_D) menu.menu.change(1);
+            else if ((k == SDL_SCANCODE_RETURN || k == SDL_SCANCODE_KP_ENTER || bound(IN_CROSS)) && !ev.key.repeat) menu.menu.activate();
+            else if (k == SDL_SCANCODE_PAGEUP) for (int i = 0; i < 8; ++i) menu.menu.move(-1);
+            else if (k == SDL_SCANCODE_PAGEDOWN) for (int i = 0; i < 8; ++i) menu.menu.move(1);
+            return true;
+        }
+        case SDL_MOUSEMOTION: {
+            int ox, oy;
+            toOverlay(ev.motion.x, ev.motion.y, ox, oy);
+            if (menu.capture < 0) menu.menu.hover(ox, oy);
+            return true;
+        }
+        case SDL_MOUSEBUTTONDOWN: {
+            if (menu.capture >= 0) { captureBinding(ca::Binding{BT::MouseButton, (int)ev.button.button}); return true; }
+            int ox, oy;
+            toOverlay(ev.button.x, ev.button.y, ox, oy);
+            if (ev.button.button == SDL_BUTTON_LEFT) menu.menu.click(ox, oy);
+            return true;
+        }
+        case SDL_MOUSEBUTTONUP: return true;
+        case SDL_MOUSEWHEEL:
+            if (menu.capture >= 0) {
+                if (ev.wheel.y) captureBinding(ca::Binding{ev.wheel.y > 0 ? BT::MouseWheelUp : BT::MouseWheelDown, 0});
+            } else if (ev.wheel.y) {
+                menu.menu.wheel(ev.wheel.y > 0 ? -2 : 2);
+            }
+            return true;
+        case SDL_CONTROLLERBUTTONDOWN: {
+            const int b = ev.cbutton.button;
+            if (menu.capture >= 0) {
+                if (b == SDL_CONTROLLER_BUTTON_GUIDE) { menu.capture = -1; menu.menu.setPrompt(""); }
+                else captureBinding(ca::Binding{BT::PadButton, b});
+                return true;
+            }
+            if (b == SDL_CONTROLLER_BUTTON_DPAD_UP) menu.menu.move(-1);
+            else if (b == SDL_CONTROLLER_BUTTON_DPAD_DOWN) menu.menu.move(1);
+            else if (b == SDL_CONTROLLER_BUTTON_DPAD_LEFT) menu.menu.change(-1);
+            else if (b == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) menu.menu.change(1);
+            else if (b == SDL_CONTROLLER_BUTTON_A) menu.menu.activate();
+            else if (b == SDL_CONTROLLER_BUTTON_B || b == SDL_CONTROLLER_BUTTON_START || b == SDL_CONTROLLER_BUTTON_GUIDE) menu.menu.close();
+            return true;
+        }
+        case SDL_CONTROLLERAXISMOTION:
+            if (menu.capture >= 0 && ev.caxis.value > 16000 &&
+                (ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || ev.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT))
+                captureBinding(ca::Binding{BT::PadTrigger, (int)ev.caxis.axis});
+            return true;
+        }
+        return false;
+    };
     while (running) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_KEYDOWN && e.key.keysym.scancode == SDL_SCANCODE_F11) {
+                bool fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
+                SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+                continue;
+            }
+            if (menuActive && menuEvent(e)) continue;
             switch (e.type) {
             case SDL_QUIT: running = false; break;
             case SDL_KEYDOWN:
+                if (e.key.keysym.scancode < SDL_NUM_SCANCODES && !e.key.repeat) in.keyClicked[e.key.keysym.scancode] = true;
                 if (e.key.keysym.scancode == SDL_SCANCODE_F11 ||
                     (e.key.keysym.scancode == SDL_SCANCODE_RETURN && (e.key.keysym.mod & KMOD_ALT))) {
                     bool fs = SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN;
@@ -635,10 +1002,27 @@ int main(int argc, char** argv) {
                 break;
             }
         }
+        if (menu.quit) running = false;
+        if (menuActive && !menu.menu.isOpen()) { // closed: resume, keep the settings
+            menuActive = false;
+            menu.capture = -1;
+            menu.menu.setPrompt("");
+            saveSettings(s, ini, cfgPath);
+            if (s.pcButtonHints) installButtonLabels(s);
+            SDL_SetRelativeMouseMode(s.mouseLook ? SDL_TRUE : SDL_FALSE);
+            in.mouseHeld = in.mouseClicked = 0;
+            in.lookAccumX = in.lookAccumY = 0;
+            in.waitRelease = true;
+            psp::kernel::setPaused(false);
+        }
         Uint64 nowTicks = SDL_GetPerformanceCounter();
         float dt = std::min(0.1f, (float)(nowTicks - lastTicks) / (float)SDL_GetPerformanceFrequency());
         lastTicks = nowTicks;
-        updateController(s, in, focused, dt);
+        if (!menuActive) updateController(s, in, focused, dt);
+        if (in.openPcSettings) {
+            in.openPcSettings = false;
+            if (!menuActive) openMenu();
+        }
         if (perf) {
             static Uint64 lastReport = nowTicks;
             if (nowTicks - lastReport >= SDL_GetPerformanceFrequency()) {
@@ -707,17 +1091,22 @@ int main(int argc, char** argv) {
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             glDisable(GL_BLEND);
         }
-        if (dialogUp) {
-            if (dialog.serial != overlaySerial) {
-                const bool cross = dialog.crossConfirms;
-                ca::DialogKeys keys{keyName(s.bindings[cross ? IN_CROSS : IN_CIRCLE]), keyName(s.bindings[cross ? IN_CIRCLE : IN_CROSS]),
-                                    keyName(s.bindings[IN_UP]) + "/" + keyName(s.bindings[IN_DOWN]),
-                                    keyName(s.bindings[IN_LEFT]) + "/" + keyName(s.bindings[IN_RIGHT])};
-                ca::paintDialog(dialog, keys, overlayPx);
-                glBindTexture(GL_TEXTURE_2D, overlayTex);
-                glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ca::kOverlayW, ca::kOverlayH, GL_RGBA, GL_UNSIGNED_BYTE, overlayPx.data());
-                overlaySerial = dialog.serial;
-            }
+        if (menuActive) {
+            menu.menu.paint(overlayPx);
+            glBindTexture(GL_TEXTURE_2D, overlayTex);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ca::kOverlayW, ca::kOverlayH, GL_RGBA, GL_UNSIGNED_BYTE, overlayPx.data());
+            overlaySerial = ~0ull;
+        } else if (dialogUp && dialog.serial != overlaySerial) {
+            const bool cross = dialog.crossConfirms;
+            ca::DialogKeys keys{keyName(s.bindings[cross ? IN_CROSS : IN_CIRCLE]), keyName(s.bindings[cross ? IN_CIRCLE : IN_CROSS]),
+                                keyName(s.bindings[IN_UP]) + "/" + keyName(s.bindings[IN_DOWN]),
+                                keyName(s.bindings[IN_LEFT]) + "/" + keyName(s.bindings[IN_RIGHT])};
+            ca::paintDialog(dialog, keys, overlayPx);
+            glBindTexture(GL_TEXTURE_2D, overlayTex);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, ca::kOverlayW, ca::kOverlayH, GL_RGBA, GL_UNSIGNED_BYTE, overlayPx.data());
+            overlaySerial = dialog.serial;
+        }
+        if (menuActive || dialogUp) {
             // The PSP screen's shape, centred.
             const float aspect = 480.0f / 272.0f, wa = (float)dw / (float)std::max(dh, 1);
             float sx = 1, sy = 1;

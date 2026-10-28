@@ -18,6 +18,7 @@
 #include <cstring>
 
 #include "psp/host.h"
+#include "psp/iso.h"
 #include "psp/memory.h"
 #include "psp/recomp.h"
 
@@ -25,6 +26,7 @@ namespace psp::host {
 Aim g_aim;
 std::atomic<bool> g_ads{false};
 DevMode g_dev;
+GameOptions g_gameOptions;
 std::atomic<int> g_targetFps{0};
 }
 
@@ -217,4 +219,56 @@ void devTick(Ctx* c) {
 
 extern "C" void ca_hook_dev_player_weapons(Ctx* c) { // after 0x08927620
     if (psp::host::g_dev.enabled) devStock(c, c->r[4]);
+}
+
+// Options menu ---------------------------------------------------------------------------------
+// The game's OPTIONS screen (terminal) has five rows; the fourth, ACCEPT CHALLENGE, is for the
+// ad hoc multiplayer, which the port does not have. It becomes the PC settings: its label and
+// help text are changed in the disc's message tables as they are read (one table per language,
+// length-prefixed strings; the new text is padded with NULs to the same length), and the
+// screen's update function (0x08964e1c, a0 = the menu; selected row at +158, s16) tells the
+// front end which row is selected, which opens the PC settings for that row
+// (TECHNICAL_NOTES.md section 22).
+namespace {
+struct TextPatch {
+    uint64_t pos;       // the string in the disc image
+    uint32_t size;      // its length with the NUL (from the table's length prefix)
+    const char* expect; // its first bytes, checked before patching
+    const char* text;   // in the game's encoding (accents as two bytes, e.g. 0x83 0x60 = o acute)
+};
+const TextPatch kTextPatches[] = {
+    {74969841, 17, "ACCEPT CHALL", "PC SETUP"},
+    {74970029, 73, "Turning this", "PC settings: video, mouse, gamepad and controls."},
+    {75024509, 9, "ANNEHMEN\000", "PC-SETUP"},
+    {75024720, 84, "Bei Aktivier", "PC-Einstellungen: Grafik, Maus, Controller und Tasten."},
+    {75081222, 17, "ACEPTAR DESA", "AJUSTES PC"},
+    {75081487, 72, "Si activas e", "Ajustes del PC: v\203Vdeo, rat\203`n, mando y controles."},
+    {75137173, 15, "ACCEPTER D\202\255", "R\202\255GLAGES PC"},
+    {75137392, 65, "Active cette", "R\203Nglages PC : vid\203No, souris, manette, touches."},
+    {75192366, 14, "ACCETTA SFID", "IMPOSTAZ. PC"},
+    {75192634, 82, "Attivando qu", "Impostazioni PC: video, mouse, controller e tasti."},
+};
+} // namespace
+
+namespace psp::kernel {
+// Called when the disc is opened (kernel.cpp).
+void installTextPatches(IsoReader& iso) {
+    int applied = 0;
+    for (const TextPatch& p : kTextPatches) {
+        std::string bytes(p.text);
+        if (bytes.size() >= p.size) continue;
+        bytes.resize(p.size - 1, '\0');
+        applied += iso.addPatch(p.pos, p.expect, bytes);
+    }
+    std::fprintf(stderr, "[PATCH] %d of %zu menu texts\n", applied, sizeof kTextPatches / sizeof kTextPatches[0]);
+}
+} // namespace psp::kernel
+
+extern "C" void ca_hook_options_menu(Ctx* c) { // after 0x08964e1c (a0 = the OPTIONS menu)
+    auto& o = psp::host::g_gameOptions;
+    const int row = (int16_t)psp::read16(c->r[4] + 158);
+    static const bool trace = std::getenv("CA_HOOK_TRACE") != nullptr;
+    if (trace && row != o.row) std::fprintf(stderr, "[HOOK] options menu %08x row %d\n", c->r[4], row);
+    o.row = row;
+    o.seenUs = (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }

@@ -155,6 +155,22 @@ void keyHint(Canvas& cv, int& x, int y, const std::string& key, const std::strin
 
 } // namespace
 
+namespace draw {
+void rect(std::vector<uint32_t>& rgba, int x, int y, int w, int h, Color c) {
+    Canvas cv{rgba, 255};
+    cv.rect(x, y, w, h, ca::Color{c.r, c.g, c.b, c.a});
+}
+void frame(std::vector<uint32_t>& rgba, int x, int y, int w, int h, Color c, int thickness) {
+    Canvas cv{rgba, 255};
+    cv.frame(x, y, w, h, ca::Color{c.r, c.g, c.b, c.a}, thickness);
+}
+void text(std::vector<uint32_t>& rgba, int x, int y, const std::string& utf8, int scale, Color c, int maxW) {
+    Canvas cv{rgba, 255};
+    ca::text(cv, x, y, utf8, scale, ca::Color{c.r, c.g, c.b, c.a}, maxW);
+}
+int textWidth(const std::string& utf8, int scale) { return ca::textWidth(utf8, scale); }
+} // namespace draw
+
 void paintDialog(const DialogView& v, const DialogKeys& keys, std::vector<uint32_t>& rgba) {
     rgba.assign((size_t)kOverlayW * kOverlayH, 0);
     if (v.kind == DialogKind::None) return;

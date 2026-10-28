@@ -58,8 +58,32 @@ void fatal(Ctx* c, const char* fmt, ...) {
 
 // ---- time ------------------------------------------------------------------------------
 static std::chrono::steady_clock::time_point g_bootTime;
-uint64_t nowUs() {
+static uint64_t hostUs() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - g_bootTime).count();
+}
+// Pause (front end menus): the guest clock stops and every guest thread stops at its next system
+// call, so the game sees no time pass.
+static std::atomic<uint64_t> g_pausedAt{0};    // host time the pause began (0: running)
+static std::atomic<uint64_t> g_pausedTotal{0}; // host time spent paused before
+static std::mutex g_pauseMutex;
+static std::condition_variable g_pauseCv;
+uint64_t nowUs() {
+    const uint64_t at = g_pausedAt.load();
+    return (at ? at : hostUs()) - g_pausedTotal.load();
+}
+void setPaused(bool paused) {
+    std::lock_guard<std::mutex> lk(g_pauseMutex);
+    const uint64_t at = g_pausedAt.load();
+    if (paused && !at) g_pausedAt = std::max<uint64_t>(hostUs(), 1);
+    if (!paused && at) {
+        g_pausedTotal += hostUs() - at;
+        g_pausedAt = 0;
+        g_pauseCv.notify_all();
+    }
+}
+static void waitWhilePaused() {
+    std::unique_lock<std::mutex> lk(g_pauseMutex);
+    g_pauseCv.wait(lk, [] { return g_pausedAt.load() == 0; });
 }
 
 // ---- threads ---------------------------------------------------------------------------
@@ -97,6 +121,7 @@ static std::atomic<bool> g_exit{false};
 static int g_exitStatus = 0;
 static uint32_t g_gp = 0;
 static IsoReader g_iso;
+void installTextPatches(IsoReader& iso); // game_hooks.cpp
 
 IsoReader& iso() { return g_iso; }
 int newUid() { return g_nextUid++; }
@@ -456,6 +481,7 @@ extern "C" void hle_call(Ctx* c, int idx) {
     static const bool stats = std::getenv("CA_HLE_STATS") != nullptr;
     static const bool byThread = stats && std::getenv("CA_HLE_STATS")[0] == 't';
     if (stats) hleStats(s.name, byThread ? (uint32_t)currentThreadId() : c->r[31]);
+    if (g_pausedAt.load()) waitWhilePaused();
     if (g_trace)
         log("%s(%08x, %08x, %08x, %08x) thread=%d ra=%08x", s.name.c_str(), c->r[4], c->r[5], c->r[6], c->r[7], currentThreadId(), c->r[31]);
     if (s.fn) {
@@ -728,6 +754,7 @@ int boot(const BootOptions& opt) {
     g_bootTime = std::chrono::steady_clock::now();
     if (!initMemory()) { log("cannot allocate guest memory"); return 1; }
     if (!g_iso.open(opt.isoPath)) { log("cannot open %s", opt.isoPath.c_str()); return 1; }
+    installTextPatches(g_iso);
     IsoEntry e;
     if (!g_iso.lookup("PSP_GAME/SYSDIR/BOOT.BIN", e)) { log("BOOT.BIN not found"); return 1; }
     std::vector<uint8_t> elf(e.size);

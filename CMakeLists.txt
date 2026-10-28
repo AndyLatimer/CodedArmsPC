@@ -198,7 +198,7 @@ if(CA_GAME_ISO)
   endif()
 
   # The game: recompiled code + HLE runtime + native front end.
-  add_executable(CodedArms WIN32 src/frontend/Main.cpp src/frontend/DialogOverlay.cpp src/frontend/CrashLog.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
+  add_executable(CodedArms WIN32 src/frontend/Main.cpp src/frontend/DialogOverlay.cpp src/frontend/OptionsMenu.cpp src/frontend/CrashLog.cpp $<TARGET_OBJECTS:ca_psp> $<TARGET_OBJECTS:ca_kirk> $<TARGET_OBJECTS:ca_guest>)
   target_include_directories(CodedArms PRIVATE src)
   if(TARGET SDL2::SDL2main)
     target_link_libraries(CodedArms PRIVATE SDL2::SDL2main)

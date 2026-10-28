@@ -1,4 +1,5 @@
 #include "psp/iso.h"
+#include <algorithm>
 #include <cctype>
 #include <cstring>
 
@@ -33,7 +34,20 @@ size_t IsoReader::read(uint32_t lba, uint64_t offset, void* dst, size_t len) {
 #else
     if (fseeko(f_, (off_t)pos, SEEK_SET) != 0) return 0;
 #endif
-    return std::fread(dst, 1, len, f_);
+    const size_t got = std::fread(dst, 1, len, f_);
+    for (const Patch& p : patches_) {
+        const uint64_t lo = std::max<uint64_t>(p.pos, pos), hi = std::min<uint64_t>(p.pos + p.bytes.size(), pos + got);
+        if (lo < hi) std::memcpy(static_cast<char*>(dst) + (lo - pos), p.bytes.data() + (lo - p.pos), (size_t)(hi - lo));
+    }
+    return got;
+}
+
+bool IsoReader::addPatch(uint64_t pos, const std::string& expect, const std::string& bytes) {
+    std::string cur(expect.size(), '\0');
+    if (read((uint32_t)(pos / kSector), pos % kSector, cur.data(), cur.size()) != cur.size() || cur != expect) return false;
+    std::lock_guard<std::mutex> lk(mutex_);
+    patches_.push_back({pos, bytes});
+    return true;
 }
 
 bool IsoReader::readDir(uint32_t lba, uint32_t size, std::vector<IsoEntry>& out) {

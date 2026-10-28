@@ -58,10 +58,10 @@ El código generado se crea en `build/` a partir de la ISO del usuario y nunca s
 - [x] Oráculo: PPSSPP headless (renderizador por software) para comparar capturas y audio.
 
 ## Pendiente (siguiente)
-- [ ] [NUEVO] Menú de opciones del port (resolución, controles, sensibilidad X/Y, inversión, vibración).
-- [ ] [NUEVO] Contexto de controles: menús con ratón/teclado (Intro/Esc) frente a juego.
+- [x] [NUEVO] **Opciones del PC dentro del menú OPTIONS del juego**: la fila ACCEPT CHALLENGE (multijugador) pasa a ser PC SETUP (texto cambiado en los 5 idiomas al leer el disco) y abre una página con el estilo de OPTIONS: pantalla, tamaño de ventana, VSync, fps, resolución interna, panorámico, estirar, suavizado, volumen, ratón (sensibilidad X/Y, inversión, apuntado con la mira), mando (sensibilidad, inversión, zonas muertas), remapeo de todos los controles y modo dev. El juego queda en pausa mientras está abierta; se guarda en config.ini. También desde OPTIONS del menú de pausa. Verificado en el front end (Linux, Xvfb).
+- [x] Teclas pulsadas y soltadas dentro de un mismo fotograma ya no se pierden (PC lentos).
 - [ ] Verificación exhaustiva del renderizador contra PPSSPP (más escenas y efectos).
-- [ ] Red ad hoc (multijugador): de momento, sin conexión.
+- [-] Red ad hoc (multijugador): descartado (no interesa); su opción en OPTIONS se usa para PC SETUP.
 - [x] Paquete de Windows para uso personal (`dist/`, no se sube a git).
 
 ## Proyecto anterior (sustituido)

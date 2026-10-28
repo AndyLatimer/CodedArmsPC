@@ -65,6 +65,14 @@ struct DevMode {
 };
 extern DevMode g_dev;
 
+// The game's OPTIONS screen (game_hooks.cpp): its selected row (0-4; 3 = the PC settings) and
+// when it was last updated (steady clock, microseconds), so the front end knows it is showing.
+struct GameOptions {
+    std::atomic<int> row{-1};
+    std::atomic<uint64_t> seenUs{0};
+};
+extern GameOptions g_gameOptions;
+
 // Frame rate the game is run at: 60 or 30; 0 keeps the game's own (20 fps in missions).
 // Applied when the game sets its frame interval (game_hooks.cpp).
 extern std::atomic<int> g_targetFps;

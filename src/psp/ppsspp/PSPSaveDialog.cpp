@@ -731,7 +731,8 @@ int PSPSaveDialog::Update(int animSpeed) {
 
 			DisplayMessage("Load completed");
 
-			DisplayButtons(DS_BUTTON_CANCEL);
+			// Port: OK closes it too (below), so the legend shows both.
+			DisplayButtons(DS_BUTTON_OK | DS_BUTTON_CANCEL);
 			DisplayBanner(DB_LOAD);
 
 			// Allow OK to be pressed as well to confirm the save.
